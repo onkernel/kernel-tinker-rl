@@ -1,0 +1,7 @@
+{
+  "include": ["core", "scripts", "examples"],
+  "extraPaths": ["."],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "standard"
+}
+
