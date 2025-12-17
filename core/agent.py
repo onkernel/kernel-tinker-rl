@@ -255,7 +255,7 @@ Previous actions:
                     }
                 )
 
-            # Add current screenshot
+            # Add current screenshot with instruction
             messages.append(
                 {
                     "role": "user",
@@ -265,7 +265,8 @@ Previous actions:
                             "image_url": {
                                 "url": f"data:image/jpeg;base64,{current_screenshot_b64}"
                             },
-                        }
+                        },
+                        {"type": "text", "text": instruction_prompt},
                     ],
                 }
             )
