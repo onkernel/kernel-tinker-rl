@@ -162,7 +162,7 @@ from tinker_cookbook.rl.types import (
 )
 
 from core.actions import parse_action_from_response, TerminateAction
-from core.browser import PoolBrowserAdapter
+from core.browser import KernelBrowserAdapter
 from core.reward_models import WebJudge, Trajectory as WebJudgeTrajectory
 from core.utils import resize_image
 
@@ -200,7 +200,7 @@ class FormFillingEnv(Env):
         self.system_prompt = system_prompt
 
         # State tracking
-        self.adapter: PoolBrowserAdapter | None = None
+        self.adapter: KernelBrowserAdapter | None = None
         self.step_count = 0
         self.screenshots: list[Image.Image] = []
         self.action_history: list[str] = []
@@ -213,13 +213,12 @@ class FormFillingEnv(Env):
 
     async def initial_observation(self):
         """Set up the environment and return first observation."""
-        # Acquire browser
-        self.adapter = PoolBrowserAdapter(
-            kernel=self.kernel,
-            pool_name=self.config.pool_name,
+        # Acquire browser from pool
+        browser = self.kernel.browser_pools.acquire(
+            self.config.pool_name,
             acquire_timeout_seconds=self.config.acquire_timeout_seconds,
         )
-        self.adapter.acquire()
+        self.adapter = KernelBrowserAdapter(self.kernel, browser)
         await self.adapter.start_heartbeat()
 
         # Navigate
@@ -306,7 +305,10 @@ class FormFillingEnv(Env):
         """End the episode."""
         if self.adapter:
             try:
-                self.adapter.release(reuse=True)
+                self.adapter.stop_heartbeat_sync()
+                self.kernel.browser_pools.release(
+                    self.config.pool_name, session_id=self.adapter.session_id, reuse=True
+                )
             except:
                 pass
             self.adapter = None
@@ -330,7 +332,10 @@ class FormFillingEnv(Env):
 
     async def cleanup_async(self):
         if self.adapter:
-            await self.adapter.release_async(reuse=True)
+            await self.adapter.stop_heartbeat()
+            self.kernel.browser_pools.release(
+                self.config.pool_name, session_id=self.adapter.session_id, reuse=True
+            )
             self.adapter = None
 
 

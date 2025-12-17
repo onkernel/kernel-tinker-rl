@@ -91,24 +91,29 @@ Two adapter types for Kernel browsers:
 ```python
 from core import KernelBrowserAdapter
 
-adapter = KernelBrowserAdapter(kernel=kernel, session_id=session_id)
+browser = kernel.browsers.create(stealth=True)
+adapter = KernelBrowserAdapter(kernel, browser)
 screenshot = adapter.capture_screenshot()
 adapter.execute_action(action)
 ```
 
-**Pool Adapter** (for training):
+**Pool-based usage** (for training):
 
 ```python
-from core import PoolBrowserAdapter
+from core import acquired_browser
 
-adapter = PoolBrowserAdapter(
-    kernel=kernel,
-    pool_name="my-pool",
-    acquire_timeout_seconds=60,
-)
-adapter.acquire()  # Get browser from pool
+# Using context manager (recommended)
+with acquired_browser(kernel, "my-pool") as adapter:
+    adapter.navigate("https://example.com")
+    screenshot = adapter.capture_screenshot()
+    # ... use browser ...
+# Browser automatically released back to pool
+
+# Or manual acquire/release
+browser = kernel.browser_pools.acquire("my-pool")
+adapter = KernelBrowserAdapter(kernel, browser)
 # ... use browser ...
-adapter.release(reuse=True)  # Return to pool
+kernel.browser_pools.release("my-pool", session_id=adapter.session_id, reuse=True)
 ```
 
 ### 4. Reward Models (`core/reward_models/`)

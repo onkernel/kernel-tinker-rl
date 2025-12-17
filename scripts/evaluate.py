@@ -56,7 +56,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from core.agent import AgentConfig, QwenAgent
-from core.browser import PoolBrowserAdapter
+from core.browser import KernelBrowserAdapter
 from core.reward_models import Trajectory, WebJudge
 from core.utils import resize_image
 
@@ -239,14 +239,13 @@ async def run_single_episode(
     }
 
     # Acquire browser from pool
-    adapter = PoolBrowserAdapter(
-        kernel=kernel,
-        pool_name=cfg.pool_name,
+    browser = kernel.browser_pools.acquire(
+        cfg.pool_name,
         acquire_timeout_seconds=cfg.acquire_timeout_seconds,
     )
+    adapter = KernelBrowserAdapter(kernel, browser)
 
     try:
-        adapter.acquire()
         await adapter.start_heartbeat()
 
         # Navigate to initial URL
@@ -321,7 +320,10 @@ async def run_single_episode(
 
     finally:
         try:
-            await adapter.release_async(reuse=True)
+            await adapter.stop_heartbeat()
+            kernel.browser_pools.release(
+                cfg.pool_name, session_id=adapter.session_id, reuse=True
+            )
         except Exception:
             pass
 

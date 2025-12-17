@@ -2,8 +2,8 @@
 Kernel Browser Adapters for Computer Use Actions.
 
 Provides adapters for executing agent actions via Kernel's browser API:
-- KernelBrowserAdapter: Direct browser control via session ID
-- PoolBrowserAdapter: Browser pool integration for scalable RL training
+- KernelBrowserAdapter: Direct browser control via session ID or browser object
+- acquired_browser: Context manager for pool-based browser acquisition
 
 Browser Pools are a key feature for RL training, enabling efficient
 browser acquisition/release across many parallel environments.
@@ -20,7 +20,8 @@ import logging
 import random
 import ssl
 import time
-from typing import TYPE_CHECKING, Callable
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Union, cast
 
 import websockets
 from PIL import Image
@@ -44,6 +45,11 @@ from .utils import compute_image_similarity
 
 if TYPE_CHECKING:
     from kernel import Kernel
+    from kernel.types import BrowserCreateResponse
+    from kernel.types.browser_pool_acquire_response import BrowserPoolAcquireResponse
+
+    # Type alias for browser objects from SDK
+    BrowserInfo = Union[BrowserCreateResponse, BrowserPoolAcquireResponse]
 
 logger = logging.getLogger(__name__)
 
@@ -64,39 +70,107 @@ class KernelBrowserAdapter:
     - Coordinate conversion from normalized (0-999) to pixel space
     - Screenshot capture
     - Action execution via Kernel's computer control API
+    - Heartbeat for keeping browser alive during long VLM inference
     - Extensible custom action handlers
 
     Usage:
         kernel = Kernel()
         browser = kernel.browsers.create(stealth=True)
-        adapter = KernelBrowserAdapter(kernel, browser.session_id)
+        adapter = KernelBrowserAdapter(kernel, browser)
 
         adapter.navigate("https://example.com")
         screenshot = adapter.capture_screenshot()
         adapter.execute_action(LeftClickAction(x=500, y=300))
+
+    For browser pools, use the acquired_browser context manager:
+        with acquired_browser(kernel, "my-pool") as adapter:
+            adapter.navigate("https://example.com")
+            # ... agent loop
+        # Browser automatically released back to pool
     """
 
     def __init__(
         self,
-        kernel: "Kernel",
-        session_id: str,
+        kernel: Kernel,
+        browser: BrowserInfo,
         viewport_width: int = 1920,
         viewport_height: int = 1080,
+        heartbeat_interval: int = 10,
+        reset_on_init: bool = True,
     ):
         """
         Initialize the adapter.
 
         Args:
             kernel: Kernel SDK client instance
-            session_id: Browser session ID from kernel.browsers.create()
+            browser: Browser object from kernel.browsers.create() or
+                kernel.browser_pools.acquire().
             viewport_width: Browser viewport width in pixels (default: 1920)
             viewport_height: Browser viewport height in pixels (default: 1080)
+            heartbeat_interval: Seconds between CDP heartbeats (default: 10).
+                Set to 0 to disable heartbeat capability.
+            reset_on_init: If True, reset the browser to a clean state on init
+                (closes popups, navigates to about:blank). Default: True.
         """
         self.kernel = kernel
-        self.session_id = session_id
+        self.session_id = browser.session_id
+        self.cdp_ws_url: str | None = getattr(browser, "cdp_ws_url", None)
+        self.live_view_url: str | None = getattr(browser, "browser_live_view_url", None)
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
+        self.heartbeat_interval = heartbeat_interval
         self._custom_handlers: dict[str, ActionHandler] = {}
+        self._heartbeat: BrowserHeartbeat | None = None
+
+        if reset_on_init:
+            self.reset_browser()
+
+    def reset_browser(self) -> None:
+        """
+        Reset the browser to a clean state.
+
+        This method:
+        1. Closes all pages/tabs except one (removes lingering popups)
+        2. Navigates the remaining page to chrome://newtab
+
+        Useful when acquiring browsers from a pool that may have leftover
+        state from previous runs (e.g., "Sign in with Google" popups).
+        """
+        # TypeScript code to clean up browser state
+        # - Close all pages except the first one
+        # - Navigate the remaining page to chrome://newtab
+        cleanup_code = """
+const pages = context.pages();
+
+// Close all pages except the first one (popups, extra tabs, etc.)
+for (let i = 1; i < pages.length; i++) {
+    await pages[i].close();
+}
+
+// Navigate the main page to chrome://newtab for a clean slate
+if (pages.length > 0) {
+    // Dismiss any dialogs that might be open
+    pages[0].on('dialog', async (dialog) => {
+        await dialog.dismiss();
+    });
+    await pages[0].goto('chrome://newtab', { waitUntil: 'load' });
+}
+
+return { closedPages: pages.length - 1 };
+"""
+        result = self.kernel.browsers.playwright.execute(
+            id=self.session_id,
+            code=cleanup_code,
+            timeout_sec=10,
+        )
+
+        if not result.success:
+            logger.warning(f"Browser reset failed: {result.error}")
+        else:
+            result_data = cast(dict[str, Any], result.result) if result.result else {}
+            closed = result_data.get("closedPages", 0)
+            if closed > 0:
+                logger.info(f"Browser reset: closed {closed} extra page(s)")
 
     def register_handler(
         self,
@@ -202,20 +276,32 @@ class KernelBrowserAdapter:
 
         Returns:
             The stable screenshot after navigation completes
+
+        Raises:
+            RuntimeError: If navigation fails
         """
+        # Add https:// if no protocol specified
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+
         baseline = self.capture_screenshot()
 
         code = f'await page.goto("{url}", {{waitUntil: "domcontentloaded"}})'
-        self.kernel.browsers.playwright.execute(id=self.session_id, code=code)
+        result = self.kernel.browsers.playwright.execute(id=self.session_id, code=code)
+
+        if not result.success:
+            raise RuntimeError(f"Navigation to {url} failed: {result.error}")
 
         return self.wait_for_screen_settle(baseline=baseline)
 
     def get_current_url(self) -> str:
         """Get the current page URL."""
         result = self.kernel.browsers.playwright.execute(
-            id=self.session_id, code="return page.url()"
+            id=self.session_id, code="return { url: page.url() };"
         )
-        return result.result or ""
+        data = cast(dict[str, str], result.result)
+        url = data.get("url")
+        return url if url else ""
 
     def execute_action(self, action: Action) -> bool:
         """
@@ -307,6 +393,45 @@ class KernelBrowserAdapter:
 
         return not getattr(action, "is_terminal", False)
 
+    async def start_heartbeat(self) -> None:
+        """
+        Start heartbeat to keep browser alive during long VLM inference.
+
+        The heartbeat sends periodic CDP commands to prevent the browser
+        from timing out. This is useful when VLM inference takes longer
+        than the browser's idle timeout.
+
+        Requires cdp_ws_url to be available (from browser object or SDK).
+        """
+        if self.heartbeat_interval <= 0:
+            return
+        if not self.cdp_ws_url:
+            logger.debug(
+                f"Cannot start heartbeat for {self.session_id}: no cdp_ws_url"
+            )
+            return
+        if self._heartbeat is not None:
+            return  # Already running
+
+        self._heartbeat = BrowserHeartbeat(
+            self.session_id, self.cdp_ws_url, self.heartbeat_interval
+        )
+        await self._heartbeat.start()
+
+    async def stop_heartbeat(self) -> None:
+        """Stop the heartbeat task."""
+        if self._heartbeat:
+            await self._heartbeat.stop()
+            self._heartbeat = None
+
+    def stop_heartbeat_sync(self) -> None:
+        """Stop the heartbeat task synchronously (for use in finally blocks)."""
+        if self._heartbeat:
+            self._heartbeat._stopped = True
+            if self._heartbeat._task:
+                self._heartbeat._task.cancel()
+            self._heartbeat = None
+
 
 # =============================================================================
 # Browser Heartbeat (for long VLM inference)
@@ -389,13 +514,26 @@ class BrowserHeartbeat:
 
 
 # =============================================================================
-# Pool Browser Adapter (for RL training)
+# Browser Pool Context Manager
 # =============================================================================
 
 
-class PoolBrowserAdapter(KernelBrowserAdapter):
+@contextmanager
+def acquired_browser(
+    kernel: "Kernel",
+    pool_name: str,
+    acquire_timeout_seconds: int = 60,
+    viewport_width: int = 1920,
+    viewport_height: int = 1080,
+    heartbeat_interval: int = 10,
+    reset_on_init: bool = True,
+) -> Iterator[KernelBrowserAdapter]:
     """
-    Browser adapter using Kernel browser pools for scalable RL training.
+    Context manager for acquiring a browser from a pool.
+
+    Automatically acquires a browser from the pool on entry and releases
+    it back to the pool on exit. On error, the browser is released with
+    reuse=False to ensure a fresh browser for the next acquisition.
 
     Browser pools provide:
     - Pre-warmed browsers for fast acquisition
@@ -409,144 +547,49 @@ class PoolBrowserAdapter(KernelBrowserAdapter):
 
     Usage:
         kernel = Kernel()
-        adapter = PoolBrowserAdapter(kernel, pool_name="my-pool")
-        adapter.acquire()
-
-        try:
+        with acquired_browser(kernel, "my-pool") as adapter:
             adapter.navigate("https://example.com")
             screenshot = adapter.capture_screenshot()
             # ... agent loop ...
-        finally:
-            adapter.release()
+        # Browser automatically released back to pool
+
+    Args:
+        kernel: Kernel SDK client instance
+        pool_name: Name of the browser pool to use
+        acquire_timeout_seconds: Timeout for acquiring a browser (default: 60)
+        viewport_width: Browser viewport width (default: 1920)
+        viewport_height: Browser viewport height (default: 1080)
+        heartbeat_interval: Seconds between CDP heartbeats (default: 10)
+        reset_on_init: If True, reset browser to clean state on init (default: True)
+
+    Yields:
+        KernelBrowserAdapter: Configured adapter for the acquired browser
     """
+    browser = kernel.browser_pools.acquire(
+        pool_name,
+        acquire_timeout_seconds=acquire_timeout_seconds,
+    )
 
-    def __init__(
-        self,
-        kernel: "Kernel",
-        pool_name: str,
-        acquire_timeout_seconds: int = 60,
-        viewport_width: int = 1920,
-        viewport_height: int = 1080,
-        heartbeat_interval: int = 10,
-    ):
-        """
-        Initialize the pool adapter.
+    adapter = KernelBrowserAdapter(
+        kernel,
+        browser,
+        viewport_width=viewport_width,
+        viewport_height=viewport_height,
+        heartbeat_interval=heartbeat_interval,
+        reset_on_init=reset_on_init,
+    )
 
-        Args:
-            kernel: Kernel SDK client instance
-            pool_name: Name of the browser pool to use
-            acquire_timeout_seconds: Timeout for acquiring a browser (default: 60)
-            viewport_width: Browser viewport width (default: 1920)
-            viewport_height: Browser viewport height (default: 1080)
-            heartbeat_interval: Seconds between CDP heartbeats (default: 10)
-        """
-        self.kernel = kernel
-        self.pool_name = pool_name
-        self.acquire_timeout_seconds = acquire_timeout_seconds
-        self.viewport_width = viewport_width
-        self.viewport_height = viewport_height
-        self.heartbeat_interval = heartbeat_interval
-        self._custom_handlers: dict = {}
-        self.session_id: str | None = None
-        self._browser_info: dict | None = None
-        self._heartbeat: BrowserHeartbeat | None = None
-
-    def acquire(self) -> None:
-        """Acquire a browser from the pool."""
-        if self.session_id is not None:
-            raise RuntimeError("Browser already acquired. Call release() first.")
-
-        browser = self.kernel.browser_pools.acquire(
-            self.pool_name,
-            acquire_timeout_seconds=self.acquire_timeout_seconds,
-        )
-        self.session_id = browser.session_id
-        self._browser_info = {
-            "session_id": browser.session_id,
-            "cdp_ws_url": browser.cdp_ws_url,
-            "live_view_url": getattr(browser, "browser_live_view_url", None),
-        }
-
-    async def start_heartbeat(self) -> None:
-        """Start heartbeat to keep browser alive during long VLM inference."""
-        if not self.session_id or self.heartbeat_interval <= 0:
-            return
-        cdp_ws_url = self._browser_info.get("cdp_ws_url") if self._browser_info else None
-        if not cdp_ws_url:
-            return
-        self._heartbeat = BrowserHeartbeat(self.session_id, cdp_ws_url, self.heartbeat_interval)
-        await self._heartbeat.start()
-
-    async def stop_heartbeat(self) -> None:
-        """Stop the heartbeat task."""
-        if self._heartbeat:
-            await self._heartbeat.stop()
-            self._heartbeat = None
-
-    def release(self, reuse: bool = True) -> None:
-        """Release browser back to pool (sync)."""
-        if self.session_id is None:
-            return
-
-        if self._heartbeat:
-            self._heartbeat._stopped = True
-            if self._heartbeat._task:
-                self._heartbeat._task.cancel()
-            self._heartbeat = None
-
-        try:
-            self.kernel.browser_pools.release(
-                self.pool_name, session_id=self.session_id, reuse=reuse
-            )
-        finally:
-            self.session_id = None
-            self._browser_info = None
-
-    async def release_async(self, reuse: bool = True) -> None:
-        """Release browser back to pool (async)."""
-        await self.stop_heartbeat()
-        self.release(reuse=reuse)
-
-    @property
-    def live_view_url(self) -> str | None:
-        """Live view URL for debugging."""
-        return self._browser_info.get("live_view_url") if self._browser_info else None
-
-    @property
-    def cdp_ws_url(self) -> str | None:
-        """CDP WebSocket URL."""
-        return self._browser_info.get("cdp_ws_url") if self._browser_info else None
-
-    def _ensure_acquired(self) -> None:
-        if self.session_id is None:
-            raise RuntimeError("Browser not acquired. Call acquire() first.")
-
-    def capture_screenshot(self) -> Image.Image:
-        self._ensure_acquired()
-        return super().capture_screenshot()
-
-    def navigate(self, url: str) -> Image.Image:
-        self._ensure_acquired()
-        return super().navigate(url)
-
-    def execute_action(self, action: Action) -> bool:
-        self._ensure_acquired()
-        return super().execute_action(action)
-
-    def get_current_url(self) -> str:
-        self._ensure_acquired()
-        return super().get_current_url()
-
-    def wait_for_screen_settle(self, baseline: Image.Image, **kwargs) -> Image.Image:
-        self._ensure_acquired()
-        return super().wait_for_screen_settle(baseline, **kwargs)
-
-    def __enter__(self) -> "PoolBrowserAdapter":
-        self.acquire()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.release(reuse=(exc_type is None))
+    try:
+        yield adapter
+    except Exception:
+        # On error, stop heartbeat and release without reuse
+        adapter.stop_heartbeat_sync()
+        kernel.browser_pools.release(pool_name, session_id=browser.session_id, reuse=False)
+        raise
+    else:
+        # On success, stop heartbeat and release with reuse
+        adapter.stop_heartbeat_sync()
+        kernel.browser_pools.release(pool_name, session_id=browser.session_id, reuse=True)
 
 
 # =============================================================================
@@ -595,6 +638,7 @@ class MockBrowserAdapter:
 
         action_type = getattr(action, "action_type", None)
         if action_type and action_type in self._custom_handlers:
-            return self._custom_handlers[action_type](self, action)
+            # MockBrowserAdapter uses the same handler signature for compatibility
+            return self._custom_handlers[action_type](self, action)  # type: ignore[arg-type]
 
         return not getattr(action, "is_terminal", False)

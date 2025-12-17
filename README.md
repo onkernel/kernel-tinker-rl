@@ -121,21 +121,16 @@ RL training requires running many parallel episodes. [Browser pools](https://www
 
 ```python
 from kernel import Kernel
-from core import PoolBrowserAdapter
+from core import acquired_browser
 
 kernel = Kernel()
 
-# Acquire a browser from the pool (instant, if one is available!)
-adapter = PoolBrowserAdapter(kernel, pool_name="rl-training")
-adapter.acquire()
-
-# Run your episode
-adapter.navigate("https://example.com")
-screenshot = adapter.capture_screenshot()
-# ... agent loop ...
-
-# Release back to pool for reuse
-adapter.release()
+# Use the context manager for automatic acquire/release
+with acquired_browser(kernel, "rl-training") as adapter:
+    adapter.navigate("https://example.com")
+    screenshot = adapter.capture_screenshot()
+    # ... agent loop ...
+# Browser automatically released back to pool
 ```
 
 **Key benefits of browser pools:**

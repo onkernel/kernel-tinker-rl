@@ -4,7 +4,7 @@ Core infrastructure for computer use RL training.
 This module provides the generic, reusable components:
 - Agent: VLM-based computer use agent
 - Actions: Structured action types (OSWorld-compatible)
-- Browser: Kernel browser adapters (direct and pool-based)
+- Browser: Kernel browser adapter and acquired_browser context manager
 - Reward Models: WebJudge and base interfaces
 - Prompts: System prompt utilities
 - Utils: Image processing and environment setup
@@ -27,9 +27,9 @@ from .actions import (
     parse_action_from_response,
 )
 from .agent import AgentConfig, QwenAgent
-from .browser import KernelBrowserAdapter, MockBrowserAdapter, PoolBrowserAdapter
+from .browser import KernelBrowserAdapter, MockBrowserAdapter, acquired_browser
 from .prompts import build_system_prompt, get_system_prompt
-from .reward_models import EvaluationResult, RewardModel, Trajectory, WebJudge
+from .reward_models import EvaluationResult, RewardModel, Trajectory, WebJudge, WebJudgeResult
 from .utils import (
     encode_image,
     load_image,
@@ -60,13 +60,14 @@ __all__ = [
     "parse_action_from_response",
     # Browser
     "KernelBrowserAdapter",
-    "PoolBrowserAdapter",
     "MockBrowserAdapter",
+    "acquired_browser",
     # Reward Models
     "RewardModel",
     "EvaluationResult",
     "Trajectory",
     "WebJudge",
+    "WebJudgeResult",
     # Prompts
     "build_system_prompt",
     "get_system_prompt",

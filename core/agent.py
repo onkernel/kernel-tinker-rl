@@ -15,7 +15,10 @@ import base64
 import io
 from dataclasses import dataclass, field
 
+from typing import cast
+
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from PIL import Image
 
 from .actions import Action, parse_action_from_response
@@ -114,6 +117,18 @@ class QwenAgent:
         """Reset agent state for a new task."""
         self.state = AgentState()
 
+    def record_prior_action(self, action_description: str) -> None:
+        """
+        Record an action that was taken externally (e.g., initial navigation).
+
+        This allows the agent to be aware of actions taken before the predict loop,
+        such as navigating to the starting URL.
+
+        Args:
+            action_description: Description of the action (e.g., "navigate(https://...)")
+        """
+        self.state.actions.append(action_description)
+
     def predict(self, instruction: str, screenshot: Image.Image) -> Action | None:
         """
         Generate the next action given a task instruction and screenshot.
@@ -158,7 +173,7 @@ class QwenAgent:
 
         return action
 
-    def _build_messages(self, instruction: str, current_screenshot_b64: str) -> list[dict]:
+    def _build_messages(self, instruction: str, current_screenshot_b64: str) -> list[ChatCompletionMessageParam]:
         """
         Build the message list for the LLM, including history.
 
@@ -169,7 +184,7 @@ class QwenAgent:
         Returns:
             List of message dicts for the OpenAI API
         """
-        messages = [
+        messages: list[dict] = [
             {
                 "role": "system",
                 "content": [{"type": "text", "text": self.system_prompt}],
@@ -271,7 +286,7 @@ Previous actions:
                 }
             )
 
-        return messages
+        return cast(list[ChatCompletionMessageParam], messages)
 
     def get_action_history(self) -> list[str]:
         """Get the list of action descriptions taken so far."""

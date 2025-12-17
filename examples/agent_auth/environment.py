@@ -41,7 +41,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import logtree
 
 from core.actions import TerminateAction, parse_action_from_response
-from core.browser import PoolBrowserAdapter
+from core.browser import KernelBrowserAdapter
 from core.reward_models.webjudge import Trajectory as WebJudgeTrajectory
 from core.reward_models.webjudge import WebJudge
 from core.utils import resize_image
@@ -104,7 +104,7 @@ class AgentAuthEnv(Env):
         self.system_prompt = system_prompt or get_agent_auth_system_prompt()
 
         # State
-        self.adapter: PoolBrowserAdapter | None = None
+        self.adapter: KernelBrowserAdapter | None = None
         self.step_count = 0
         self.action_history: list[str] = []
         self.screenshots: list[Image.Image] = []
@@ -128,12 +128,11 @@ class AgentAuthEnv(Env):
         """
         try:
             # Acquire browser from pool
-            self.adapter = PoolBrowserAdapter(
-                kernel=self.kernel,
-                pool_name=self.config.pool_name,
+            browser = self.kernel.browser_pools.acquire(
+                self.config.pool_name,
                 acquire_timeout_seconds=self.config.acquire_timeout_seconds,
             )
-            self.adapter.acquire()
+            self.adapter = KernelBrowserAdapter(self.kernel, browser)
 
             # Start heartbeat to keep browser alive during long VLM inference
             await self.adapter.start_heartbeat()
@@ -339,7 +338,10 @@ class AgentAuthEnv(Env):
         # Release browser
         if self.adapter is not None:
             try:
-                self.adapter.release(reuse=True)
+                self.adapter.stop_heartbeat_sync()
+                self.kernel.browser_pools.release(
+                    self.config.pool_name, session_id=self.adapter.session_id, reuse=True
+                )
             except Exception as e:
                 logger.warning(f"Failed to release browser: {e}")
             self.adapter = None
@@ -365,7 +367,12 @@ class AgentAuthEnv(Env):
         """Ensure browser is released (sync version)."""
         if self.adapter is not None:
             try:
-                self.adapter.release(reuse=not self._browser_corrupted)
+                self.adapter.stop_heartbeat_sync()
+                self.kernel.browser_pools.release(
+                    self.config.pool_name,
+                    session_id=self.adapter.session_id,
+                    reuse=not self._browser_corrupted,
+                )
             except Exception:
                 pass
             self.adapter = None
@@ -374,7 +381,12 @@ class AgentAuthEnv(Env):
         """Ensure browser is released (async version - properly stops heartbeat)."""
         if self.adapter is not None:
             try:
-                await self.adapter.release_async(reuse=not self._browser_corrupted)
+                await self.adapter.stop_heartbeat()
+                self.kernel.browser_pools.release(
+                    self.config.pool_name,
+                    session_id=self.adapter.session_id,
+                    reuse=not self._browser_corrupted,
+                )
             except Exception:
                 pass
             self.adapter = None
