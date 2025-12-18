@@ -62,14 +62,6 @@ Tasks are stored in JSONL format with three required fields:
 
 For the Agent Auth example, a preprocessed task file is included at `examples/agent_auth/tasks.jsonl`.
 
-To create your own task file from raw data:
-
-```bash
-uv run python -m scripts.preprocess_tasks \
-  --input your-raw-data.jsonl \
-  --output your-tasks.jsonl
-```
-
 ## Step 3: Run a Quick Test
 
 Before training, test that everything works with a single agent run:
