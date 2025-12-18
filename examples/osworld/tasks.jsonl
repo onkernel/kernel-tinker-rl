@@ -1,0 +1,10 @@
+{"id": "github-signin", "initial_url": "https://github.com", "task": "Navigate to the sign in page"}
+{"id": "duckduckgo-search", "initial_url": "https://duckduckgo.com", "task": "Search for 'machine learning' and click the first result"}
+{"id": "wikipedia-ai", "initial_url": "https://wikipedia.org", "task": "Find and open the article about Artificial Intelligence"}
+{"id": "hn-top", "initial_url": "https://news.ycombinator.com", "task": "Click on the top story"}
+{"id": "reddit-popular", "initial_url": "https://reddit.com", "task": "Navigate to the popular posts section"}
+{"id": "stackoverflow-search", "initial_url": "https://stackoverflow.com", "task": "Search for 'python async await'"}
+{"id": "twitter-explore", "initial_url": "https://twitter.com", "task": "Navigate to the explore page"}
+{"id": "youtube-search", "initial_url": "https://youtube.com", "task": "Search for 'tech news' and click on the first video"}
+{"id": "amazon-search", "initial_url": "https://amazon.com", "task": "Search for 'wireless headphones'"}
+{"id": "nytimes-article", "initial_url": "https://nytimes.com", "task": "Click on the first headline in the main section"}

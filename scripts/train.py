@@ -12,22 +12,22 @@ Usage:
     cd kernel-tinker-rl
 
     # Agent Auth training with browser pool
-    uv run python -m scripts.train \\
-        --env agent_auth \\
-        --pool-name my-browser-pool \\
-        --batch-size 4 \\
+    uv run python -m scripts.train \
+        --env agent_auth \
+        --pool-name my-browser-pool \
+        --batch-size 4 \
         --group-size 2
 
     # With W&B logging
-    uv run python -m scripts.train \\
-        --env agent_auth \\
-        --pool-name my-browser-pool \\
+    uv run python -m scripts.train \
+        --env agent_auth \
+        --pool-name my-browser-pool \
         --wandb-project my-project
 
     # Custom task file
-    uv run python -m scripts.train \\
+    uv run python -m scripts.train \
         --env agent_auth \\
-        --task-file examples/agent_auth/tasks.jsonl \\
+        --task-file examples/agent_auth/tasks.jsonl \
         --pool-name my-browser-pool
 
     # Dry run (print config without running)
@@ -35,6 +35,7 @@ Usage:
 
 Environment Variables:
     KERNEL_API_KEY: Required for Kernel browser API
+    TINKER_API_KEY: Required for Tinker RL training
     OPENROUTER_API_KEY: Required for WebJudge (o4-mini)
     WANDB_API_KEY: Required for --wandb-project
 """
@@ -310,6 +311,12 @@ async def train_main(cfg: TrainConfig) -> int:
         console.print("[red]✗ KERNEL_API_KEY not set[/]")
         return 1
     console.print("  ✓ KERNEL_API_KEY")
+
+    tinker_key = os.getenv("TINKER_API_KEY")
+    if not tinker_key and not cfg.dry_run:
+        console.print("[red]✗ TINKER_API_KEY not set[/]")
+        return 1
+    console.print("  ✓ TINKER_API_KEY")
 
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if not openrouter_key and cfg.webjudge_enabled and not cfg.dry_run:
