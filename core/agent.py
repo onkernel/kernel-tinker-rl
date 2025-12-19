@@ -207,85 +207,28 @@ Instruction: {instruction}
 Previous actions:
 {previous_actions_str}"""
 
-        # Add history with screenshots and responses
-        history_len = min(self.config.history_n, len(self.state.responses))
-        if history_len > 0:
-            history_responses = self.state.responses[-history_len:]
-            history_screenshots = self.state.screenshots[-history_len - 1 : -1]
-
-            for idx in range(history_len):
-                if idx < len(history_screenshots):
-                    screenshot_b64 = history_screenshots[idx]
-                    if idx == 0:
-                        # First history item includes the full instruction
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
-                                        },
-                                    },
-                                    {"type": "text", "text": instruction_prompt},
-                                ],
-                            }
-                        )
-                    else:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{screenshot_b64}"
-                                        },
-                                    }
-                                ],
-                            }
-                        )
-
-                # Add the assistant's response
-                messages.append(
+        # Split into two user messages for better tracing visibility:
+        # 1. Screenshot image
+        # 2. Text instruction
+        messages.append(
+            {
+                "role": "user",
+                "content": [
                     {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": history_responses[idx]}],
-                    }
-                )
-
-            # Add current screenshot with instruction
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{current_screenshot_b64}"
-                            },
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{current_screenshot_b64}"
                         },
-                        {"type": "text", "text": instruction_prompt},
-                    ],
-                }
-            )
-        else:
-            # No history - first step
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{current_screenshot_b64}"
-                            },
-                        },
-                        {"type": "text", "text": instruction_prompt},
-                    ],
-                }
-            )
+                    },
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": instruction_prompt,
+            }
+        )
 
         return cast(list[ChatCompletionMessageParam], messages)
 
