@@ -38,7 +38,7 @@ from PIL import Image
 import raindrop.analytics as raindrop
 from raindrop.models import Attachment
 
-from .utils import encode_image
+from .utils import encode_image, resize_image
 
 if TYPE_CHECKING:
     from .actions import Action
@@ -108,10 +108,25 @@ def flush_raindrop() -> None:
 
 AttachmentRole = Literal["input", "output", "context"]
 
+# Max image size for raindrop attachments (keeps events under 1MB limit)
+RAINDROP_MAX_IMAGE_SIZE = 512
+RAINDROP_IMAGE_QUALITY = 60
 
-def image_to_data_url(image: Image.Image, format: str = "PNG") -> str:
-    """Convert a PIL Image to a base64 data URL."""
-    b64 = encode_image(image, format=format)
+
+def image_to_data_url(
+    image: Image.Image,
+    format: str = "JPEG",
+    quality: int = RAINDROP_IMAGE_QUALITY,
+    max_size: int = RAINDROP_MAX_IMAGE_SIZE,
+) -> str:
+    """
+    Convert a PIL Image to a base64 data URL.
+
+    Resizes and compresses the image to keep raindrop events small.
+    """
+    # Resize to reduce file size
+    resized = resize_image(image, max_size=max_size)
+    b64 = encode_image(resized, format=format, quality=quality)
     mime_type = f"image/{format.lower()}"
     return f"data:{mime_type};base64,{b64}"
 
@@ -121,7 +136,7 @@ def make_image_attachment(
     name: str,
     role: AttachmentRole = "input",
 ) -> Attachment:
-    """Create a Raindrop image attachment from a PIL Image."""
+    """Create a Raindrop image attachment from a PIL Image (resized and compressed)."""
     return Attachment(
         type="image",
         value=image_to_data_url(image),

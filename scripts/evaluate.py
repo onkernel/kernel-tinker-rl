@@ -48,6 +48,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 
 from dotenv import load_dotenv
 from kernel import Kernel
@@ -60,6 +61,7 @@ from core.browser import KernelBrowserAdapter
 from core.reward_models import Trajectory, WebJudge
 from core.tracking import (
     begin_episode,
+    create_step_callbacks,
     finish_episode,
     generate_id,
     init_raindrop,
@@ -67,6 +69,10 @@ from core.tracking import (
     shutdown_raindrop,
     track_webjudge_signal,
 )
+
+def ts() -> str:
+    """Return short timestamp [HH:MM:SS] for log lines."""
+    return datetime.now().strftime("[%H:%M:%S]")
 
 console = Console()
 
@@ -243,19 +249,17 @@ def get_tasks_and_system_prompt(cfg: EvalConfig):
         raise ValueError(f"Unknown environment: {cfg.env}")
 
 
-async def run_single_episode(
+def _run_episode_sync(
     task,
-    kernel: Kernel,
+    adapter: KernelBrowserAdapter,
     agent_config: AgentConfig,
     cfg: EvalConfig,
+    convo_id: str | None = None,
 ) -> tuple[Trajectory, dict]:
     """
-    Run a single evaluation episode.
+    Run the synchronous part of an episode (runs in thread pool).
 
-    Creates its own agent instance for thread safety in concurrent execution.
-
-    Returns:
-        Tuple of (trajectory, metadata)
+    Browser acquire/release and heartbeat are managed by the caller.
     """
     task_label = f"{task.domain} ({task.id})"
     metadata = {
@@ -269,64 +273,85 @@ async def run_single_episode(
     # Create agent for this episode (each concurrent task gets its own)
     agent = QwenAgent(config=agent_config)
 
-    # Acquire browser from pool
-    browser = kernel.browser_pools.acquire(
-        cfg.pool_name,
-        acquire_timeout_seconds=cfg.acquire_timeout_seconds,
-    )
-    adapter = KernelBrowserAdapter(kernel, browser)
-    console.print(f"    [dim]{task_label}: browser acquired[/]")
-
+    # Navigate to initial URL
+    t_nav_start = time.perf_counter()
     try:
-        await adapter.start_heartbeat()
-
-        # Navigate to initial URL
-        try:
-            adapter.navigate(task.initial_url)
-            console.print(f"    [dim]{task_label}: navigated[/]")
-        except Exception as e:
-            metadata["error"] = f"Navigation failed: {e}"
-            return Trajectory(
-                task_id=task.id,
-                task=task.task,
-                action_history=[],
-                screenshots=[],
-                initial_url=task.initial_url,
-            ), metadata
-
-        # Initial screenshot
-        initial_screenshot = adapter.capture_screenshot()
-
-        # Run the shared agent loop
-        loop_result = run_agent_loop(
-            agent=agent,
-            adapter=adapter,
+        adapter.navigate(task.initial_url)
+        t_nav = time.perf_counter() - t_nav_start
+        console.print(f"    {ts()} [dim]{task_label}: navigate ({t_nav:.1f}s) → {task.initial_url}[/]")
+    except Exception as e:
+        metadata["error"] = f"Navigation failed: {e}"
+        return Trajectory(
+            task_id=task.id,
             task=task.task,
-            initial_screenshot=initial_screenshot,
-            max_steps=cfg.max_steps,
-            image_max_size=cfg.image_max_size,
+            action_history=[],
+            screenshots=[],
+            initial_url=task.initial_url,
+        ), metadata
+
+    # Initial screenshot
+    initial_screenshot = adapter.capture_screenshot()
+
+    # Create step callbacks - Raindrop tracking (if enabled) + console logging (always)
+    raindrop_on_step_start = None
+    raindrop_on_step_complete = None
+    raindrop_on_action_overlay = None
+
+    if convo_id and is_raindrop_enabled():
+        raindrop_on_step_start, raindrop_on_step_complete, raindrop_on_action_overlay, _ = create_step_callbacks(
+            model=agent_config.model,
+            convo_id=convo_id,
+            nav_step_offset=1,  # Navigation is step 1
         )
 
-        # Build action history (prepend navigation)
-        action_history = [f"Navigate to {task.initial_url}"] + loop_result.action_history
+    # Wrap callbacks to always log to console AND optionally track to Raindrop
+    def on_step_start(step: int, screenshot):
+        if raindrop_on_step_start:
+            raindrop_on_step_start(step, screenshot)
 
-        # Update metadata from loop result
-        metadata["steps"] = loop_result.steps_completed
-        metadata["terminal_action"] = loop_result.terminal_action
-        if loop_result.error:
-            metadata["error"] = loop_result.error
+    def on_action_overlay(step: int, action, overlay):
+        if raindrop_on_action_overlay:
+            raindrop_on_action_overlay(step, action, overlay)
 
-        term_info = f", terminal={loop_result.terminal_action}" if loop_result.terminal_action else ""
-        console.print(f"    [dim]{task_label}: {loop_result.steps_completed} steps{term_info}[/]")
+    def on_step_complete(step: int, step_result):
+        # Always log to console with timing
+        display_step = step + 1  # Navigation is step 1
+        if step_result.error or step_result.action is None:
+            console.print(f"    {ts()} [dim]{task_label}: step {display_step} error: {step_result.error or 'Failed to parse action'}[/]")
+        elif step_result.action_desc:
+            desc = step_result.action_desc
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            if step_result.is_terminal:
+                timing = f"total={step_result.total_time:.1f}s predict={step_result.predict_time:.1f}s"
+            else:
+                timing = f"total={step_result.total_time:.1f}s predict={step_result.predict_time:.1f}s exec={step_result.exec_time:.1f}s"
+            console.print(f"    {ts()} [dim]{task_label}: step {display_step} {timing}: {desc}[/]")
+        # Also track to Raindrop if enabled
+        if raindrop_on_step_complete:
+            raindrop_on_step_complete(step, step_result)
 
-    finally:
-        try:
-            await adapter.stop_heartbeat()
-            kernel.browser_pools.release(
-                cfg.pool_name, session_id=adapter.session_id, reuse=True
-            )
-        except Exception:
-            pass
+    # Run the shared agent loop
+    loop_result = run_agent_loop(
+        agent=agent,
+        adapter=adapter,
+        task=task.task,
+        initial_screenshot=initial_screenshot,
+        max_steps=cfg.max_steps,
+        image_max_size=cfg.image_max_size,
+        on_step_start=on_step_start,
+        on_step_complete=on_step_complete,
+        on_action_overlay=on_action_overlay,
+    )
+
+    # Build action history (prepend navigation)
+    action_history = [f"Navigate to {task.initial_url}"] + loop_result.action_history
+
+    # Update metadata from loop result
+    metadata["steps"] = loop_result.steps_completed
+    metadata["terminal_action"] = loop_result.terminal_action
+    if loop_result.error:
+        metadata["error"] = loop_result.error
 
     trajectory = Trajectory(
         task_id=task.id,
@@ -337,6 +362,103 @@ async def run_single_episode(
     )
 
     return trajectory, metadata
+
+
+def _acquire_and_reset_browser_sync(pool_name: str, acquire_timeout: int, task_id: str):
+    """
+    Create Kernel, acquire browser, create adapter and reset - all in thread.
+
+    This runs entirely in a thread pool worker to avoid blocking the event loop.
+    The browser reset (which makes HTTP calls) happens here in the thread.
+
+    Returns:
+        Tuple of (kernel, adapter, acquire_time_seconds)
+    """
+    t_start = time.perf_counter()
+
+    kernel = Kernel()
+
+    browser = kernel.browser_pools.acquire(
+        pool_name,
+        acquire_timeout_seconds=acquire_timeout,
+    )
+
+    # Create adapter WITH reset_on_init=True (the default)
+    # This resets the browser to a clean state - and it happens in this thread,
+    # not on the event loop, so it doesn't block other tasks
+    adapter = KernelBrowserAdapter(kernel, browser, reset_on_init=True)
+
+    total_time = time.perf_counter() - t_start
+    return kernel, adapter, total_time
+
+
+async def run_single_episode(
+    task,
+    agent_config: AgentConfig,
+    cfg: EvalConfig,
+    convo_id: str | None = None,
+) -> tuple[Trajectory, dict]:
+    """
+    Run a single evaluation episode with proper async/thread handling.
+
+    - Kernel creation + browser acquire run together in thread pool
+    - Heartbeat runs in async context (needs event loop)
+    - Agent loop runs in thread pool (blocking VLM calls)
+    """
+    task_label = f"{task.domain} ({task.id})"
+
+    # Create Kernel + acquire browser + reset - all in thread pool for true parallelism
+    # The browser reset happens in the thread, not on the event loop
+    kernel, adapter, acquire_time = await asyncio.to_thread(
+        _acquire_and_reset_browser_sync,
+        cfg.pool_name,
+        cfg.acquire_timeout_seconds,
+        task.id,
+    )
+
+    console.print(f"    {ts()} [dim]{task_label}: browser acquired ({acquire_time:.1f}s)[/]")
+
+    heartbeat_task: asyncio.Task | None = None
+    try:
+        # Start heartbeat as background task (don't await - it has random delays)
+        heartbeat_task = asyncio.create_task(adapter.start_heartbeat())
+
+        # Run the agent loop in thread pool (blocking VLM calls)
+        trajectory, metadata = await asyncio.to_thread(
+            _run_episode_sync,
+            task,
+            adapter,
+            agent_config,
+            cfg,
+            convo_id,
+        )
+
+        return trajectory, metadata
+
+    finally:
+        # Cancel heartbeat task if still running, then stop heartbeat
+        if heartbeat_task is not None and not heartbeat_task.done():
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        await adapter.stop_heartbeat()
+
+        # Release browser in thread pool (blocking HTTP call)
+        # Don't reuse if browser is in bad state (e.g., reset failed)
+        reuse = not adapter._should_not_reuse
+        if not reuse:
+            console.print(f"    {ts()} [yellow]Releasing browser {adapter.session_id} with reuse=False (browser in bad state)[/]")
+        try:
+            await asyncio.to_thread(
+                kernel.browser_pools.release,
+                cfg.pool_name,
+                session_id=adapter.session_id,
+                reuse=reuse,
+            )
+        except Exception as e:
+            console.print(f"    {ts()} [red]Browser release failed for {adapter.session_id}: {e}[/]")
 
 
 async def eval_main(cfg: EvalConfig) -> int:
@@ -433,7 +555,8 @@ async def eval_main(cfg: EvalConfig) -> int:
         nonlocal success_count, completed_count
 
         async with semaphore:
-            console.print(f"  [dim]→ Starting:[/] {task.domain} ({task.id[:8]}...)")
+            task_str = task.task[:60] + "..." if len(task.task) > 60 else task.task
+            console.print(f"  {ts()} [dim]→ Starting:[/] {task.domain} ({task.id}) - {task_str}")
             t_start = time.perf_counter()
 
             # Start Raindrop interaction for this episode
@@ -453,15 +576,21 @@ async def eval_main(cfg: EvalConfig) -> int:
                 },
             )
 
+            t_task_elapsed = 0.0
+            t_webjudge_elapsed = 0.0
+
             try:
+                # Run episode (blocking work runs in thread pool)
                 trajectory, metadata = await run_single_episode(
                     task=task,
-                    kernel=kernel,
                     agent_config=agent_config,
                     cfg=cfg,
+                    convo_id=episode_convo_id,
                 )
+                t_task_elapsed = time.perf_counter() - t_start
 
                 # Evaluate with WebJudge
+                t_wj_start = time.perf_counter()
                 if trajectory.screenshots:
                     try:
                         wj_result = await webjudge.evaluate(trajectory)
@@ -476,12 +605,14 @@ async def eval_main(cfg: EvalConfig) -> int:
                     success = False
                     score = 0.0
                     reasoning = "No screenshots captured"
+                t_webjudge_elapsed = time.perf_counter() - t_wj_start
 
             except Exception as e:
                 success = False
                 score = 0.0
                 reasoning = f"Episode error: {e}"
                 metadata = {"error": str(e)}
+                t_task_elapsed = time.perf_counter() - t_start
 
             t_elapsed = time.perf_counter() - t_start
 
@@ -525,15 +656,20 @@ async def eval_main(cfg: EvalConfig) -> int:
 
                 status = "[green]✓[/]" if success else "[red]✗[/]"
                 steps_info = f"{metadata.get('steps', 0)} steps"
+                term_action = metadata.get('terminal_action')
+                term_info = f", {term_action}" if term_action else ""
+                # Show timing breakdown: task time + webjudge time = total
+                timing_info = f"{t_task_elapsed:.1f}s task + {t_webjudge_elapsed:.1f}s judge"
                 console.print(
-                    f"  {status} [{completed_count}/{len(tasks)}] {task.domain}: "
-                    f"{steps_info}, {t_elapsed:.1f}s"
+                    f"  {ts()} {status} [{completed_count}/{len(tasks)}] {task.domain}: "
+                    f"{steps_info}{term_info}, {timing_info}"
                 )
 
             return result
 
     # Run all tasks concurrently with TaskGroup
-    console.print(f"  Starting {len(tasks)} tasks...")
+    console.print(f"  {ts()} Starting {len(tasks)} tasks...")
+
     async with asyncio.TaskGroup() as tg:
         for i, task in enumerate(tasks):
             tg.create_task(run_and_evaluate(task, i))

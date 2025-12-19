@@ -121,6 +121,7 @@ class KernelBrowserAdapter:
         self.heartbeat_interval = heartbeat_interval
         self._custom_handlers: dict[str, ActionHandler] = {}
         self._heartbeat: BrowserHeartbeat | None = None
+        self._should_not_reuse: bool = False  # Set True if browser is in bad state
 
         if reset_on_init:
             self.reset_browser()
@@ -165,7 +166,11 @@ return { closedPages: pages.length - 1 };
         )
 
         if not result.success:
-            logger.warning(f"Browser reset failed: {result.error}")
+            logger.warning(
+                f"Browser reset failed for session {self.session_id}: {result.error}"
+                + (f" (result: {result.result})" if result.result else "")
+            )
+            self._should_not_reuse = True  # Mark for non-reuse on release
         else:
             result_data = cast(dict[str, Any], result.result) if result.result else {}
             closed = result_data.get("closedPages", 0)
@@ -587,9 +592,10 @@ def acquired_browser(
         kernel.browser_pools.release(pool_name, session_id=browser.session_id, reuse=False)
         raise
     else:
-        # On success, stop heartbeat and release with reuse
+        # On success, stop heartbeat and release with reuse (unless browser is in bad state)
         adapter.stop_heartbeat_sync()
-        kernel.browser_pools.release(pool_name, session_id=browser.session_id, reuse=True)
+        reuse = not adapter._should_not_reuse
+        kernel.browser_pools.release(pool_name, session_id=browser.session_id, reuse=reuse)
 
 
 # =============================================================================

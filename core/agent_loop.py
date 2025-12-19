@@ -278,6 +278,3 @@ def run_agent_loop(
         error=error,
         terminal_action=terminal_action,
     )
-
-
-
