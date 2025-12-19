@@ -46,16 +46,14 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Callable
 
 # Suppress noisy httpx logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-from cuid2 import cuid_wrapper
 from kernel import Kernel
 from PIL import Image
 import raindrop.analytics as raindrop
-from raindrop.models import Attachment
 from rich.console import Console
 from rich.table import Table
 
@@ -63,22 +61,24 @@ from rich.table import Table
 # Add parent to path for imports
 sys.path.insert(0, str(__file__).rsplit("/", 2)[0])
 
-# Generate cuid2 IDs
-cuid2 = cuid_wrapper()
-
-# Track whether raindrop is enabled
-_raindrop_enabled = False
-
 from core import (
     Action,
     AgentConfig,
     KernelBrowserAdapter,
     QwenAgent,
+    StepResult,
     Trajectory,
     WebJudge,
-    WebJudgeResult,
-    encode_image,
+    run_agent_loop,
     setup_environment,
+)
+from core.tracking import (
+    generate_id,
+    init_raindrop,
+    is_raindrop_enabled,
+    make_image_attachment,
+    run_webjudge_with_tracking,
+    shutdown_raindrop,
 )
 
 console = Console()
@@ -87,30 +87,6 @@ DEFAULT_MODEL = "qwen/qwen3-vl-8b-instruct"
 
 # Available environments
 AVAILABLE_ENVS = ["osworld", "agent_auth"]
-
-
-def _image_to_data_url(image: Image.Image, format: str = "PNG") -> str:
-    """Convert a PIL Image to a base64 data URL for Raindrop attachments."""
-    b64 = encode_image(image, format=format)
-    mime_type = f"image/{format.lower()}"
-    return f"data:{mime_type};base64,{b64}"
-
-
-AttachmentRole = Literal["input", "output", "context"]
-
-
-def _make_image_attachment(
-    image: Image.Image,
-    name: str,
-    role: AttachmentRole = "input",
-) -> Attachment:
-    """Create a Raindrop image attachment from a PIL Image."""
-    return Attachment(
-        type="image",
-        value=_image_to_data_url(image),
-        name=name,
-        role=role,
-    )
 
 
 @dataclass
@@ -129,7 +105,7 @@ class RunConfig:
 
     # Agent config
     model: str = DEFAULT_MODEL
-    max_steps: int = 20
+    max_steps: int = 10
 
     # Browser config
     pool_name: str | None = None  # Use pool if set, else create browser
@@ -170,7 +146,7 @@ def parse_args() -> RunConfig:
 
     # Agent config
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})")
-    parser.add_argument("--max-steps", type=int, default=20, help="Max steps (default: 20)")
+    parser.add_argument("--max-steps", type=int, default=10, help="Max steps (default: 10)")
 
     # Browser config
     parser.add_argument("--pool-name", default=None, help="Browser pool name (optional)")
@@ -290,28 +266,6 @@ def print_config(cfg: RunConfig, url: str, task: str, task_id: str | None = None
     console.print(table)
 
 
-def _init_raindrop() -> bool:
-    """Initialize Raindrop if RAINDROP_WRITE_KEY is set. Returns True if enabled."""
-    global _raindrop_enabled
-    write_key = os.getenv("RAINDROP_WRITE_KEY")
-    if not write_key:
-        return False
-
-    raindrop.init(write_key, tracing_enabled=True)
-    _raindrop_enabled = True
-    return True
-
-
-def _shutdown_raindrop() -> None:
-    """Flush and shutdown Raindrop if it was initialized."""
-    if _raindrop_enabled:
-        try:
-            raindrop.flush()
-            raindrop.shutdown()
-        except Exception as e:
-            console.print(f"[yellow]Warning: Raindrop shutdown error: {e}[/]")
-
-
 # --- Raindrop-decorated functions (no-op when tracing disabled) ---
 
 
@@ -321,152 +275,101 @@ def _navigate(adapter: KernelBrowserAdapter, url: str) -> Image.Image:
     return adapter.navigate(url)
 
 
-@raindrop.task("webjudge")
-async def _run_webjudge(webjudge: WebJudge, trajectory: Trajectory) -> WebJudgeResult:
-    """Run WebJudge evaluation."""
-    return await webjudge.evaluate(trajectory)
-
-
-@raindrop.task("agent_loop")
-@raindrop.interaction("agent_loop")
-def _run_agent_loop(
-    task: str,
+def _create_step_callbacks(
     model: str,
-    max_steps: int,
-    agent: QwenAgent,
-    adapter: KernelBrowserAdapter,
-    screenshots: list[Image.Image],
-    step_timings: list[tuple[int, str, float, float, float]],
     convo_id: str,
-) -> tuple[str, str]:
-    """Run the agent loop, returning (final_action_desc, termination_reason)."""
-    final_action_desc = step_timings[0][1] if step_timings else "none"
-    termination_reason = "max_steps"
+    nav_step_offset: int = 1,
+) -> tuple[
+    Callable[[int, Image.Image], None],
+    Callable[[int, StepResult], None],
+    Callable[[int, Action, Image.Image], None],
+    dict,
+]:
+    """
+    Create callbacks for the agent loop that handle logging and Raindrop integration.
 
-    # Steps start at 2 since navigation is step 1
-    for step in range(2, max_steps + 2):
-        t_step_start = time.time()
+    Returns:
+        Tuple of (on_step_start, on_step_complete, on_action_overlay, shared_state)
+    """
+    # Shared state for passing data between callbacks
+    shared_state: dict = {
+        "step_interaction": None,
+        "output_attachments": [],
+    }
 
-        # Use the latest screenshot (result of previous action) for prediction
-        screenshot = screenshots[-1]
+    def on_step_start(step: int, screenshot: Image.Image) -> None:
+        """Called at the start of each step."""
+        display_step = step + nav_step_offset
 
-        # Create input attachments for this step
-        input_attachments = [_make_image_attachment(screenshot, f"step_{step}_input", "input")]
-
-        # Begin a step interaction with the screenshot as input
-        step_interaction = None
-        if _raindrop_enabled:
-            step_interaction = raindrop.begin(
+        if is_raindrop_enabled():
+            input_attachments = [make_image_attachment(screenshot, f"step_{display_step}_input", "input")]
+            shared_state["step_interaction"] = raindrop.begin(
                 user_id=os.getenv("USER") or "system",
                 event="agent_loop",
-                input=f"Step {step}: Predict next action for task: {task}",
+                input=f"Step {display_step}: Predict next action",
                 convo_id=convo_id,
                 attachments=input_attachments,
                 properties={
-                    "step": step,
+                    "step": display_step,
                     "model": model,
                 },
             )
+        shared_state["output_attachments"] = []
 
-        # Get agent action
-        t_predict_start = time.time()
-        action = agent.predict(task, screenshot)
-        t_predict = time.time() - t_predict_start
+    def on_action_overlay(step: int, action: Action, overlay: Image.Image) -> None:
+        """Called when an action overlay image is generated."""
+        display_step = step + nav_step_offset
+        shared_state["output_attachments"].append(
+            make_image_attachment(overlay, f"step_{display_step}_click_overlay", "output")
+        )
 
-        if action is None:
-            console.print(f"[yellow]Step {step}: Failed to parse action[/]")
+    def on_step_complete(step: int, result: StepResult) -> None:
+        """Called after each step completes."""
+        display_step = step + nav_step_offset
+        step_interaction = shared_state.get("step_interaction")
+        output_attachments = shared_state.get("output_attachments", [])
+
+        # Handle error/parse failure
+        if result.error or result.action is None:
+            console.print(f"[yellow]Step {display_step}: {result.error or 'Failed to parse action'}[/]")
             if step_interaction:
-                step_interaction.finish(output="Failed to parse action")
-            termination_reason = "parse_failure"
-            break
+                step_interaction.finish(output=result.error or "Failed to parse action")
+            return
 
-        action_desc = action.to_description()
-        if action.model_description:
-            action_desc = f"{action.model_description} ({action_desc})"
-        final_action_desc = action_desc
+        action_desc = result.action_desc
 
-        # Check for terminal action
-        if getattr(action, "is_terminal", False):
-            t_total = time.time() - t_step_start
-            step_timings.append((step, action_desc, t_total, t_predict, 0.0))
+        # Log the step
+        if result.is_terminal:
             console.print(
-                f"[blue]Step {step}[/] [dim]total={t_total:.1f}s predict={t_predict:.1f}s[/]: "
-                f"{action_desc}"
+                f"[blue]Step {display_step}[/] [dim]total={result.total_time:.1f}s "
+                f"predict={result.predict_time:.1f}s[/]: {action_desc}"
             )
             console.print(f"\n[green]Agent terminated: {action_desc}[/]")
-            # Terminal actions don't change state, so current screenshot is the result
-            screenshots.append(screenshot)
 
             if step_interaction:
                 step_interaction.finish(
                     output=action_desc,
-                    properties={"is_terminal": True, "predict_time": t_predict},
+                    properties={"is_terminal": True, "predict_time": result.predict_time},
+                )
+        else:
+            console.print(
+                f"[blue]Step {display_step}[/] [dim]total={result.total_time:.1f}s "
+                f"predict={result.predict_time:.1f}s exec={result.exec_time:.1f}s[/]: {action_desc}"
+            )
+
+            if step_interaction:
+                if output_attachments:
+                    step_interaction.add_attachments(output_attachments)
+                step_interaction.finish(
+                    output=action_desc,
+                    properties={
+                        "predict_time": result.predict_time,
+                        "exec_time": result.exec_time,
+                        "total_time": result.total_time,
+                    },
                 )
 
-            termination_reason = "terminal_action"
-            break
-
-        # For click actions, create annotated image as output attachment
-        output_attachments = []
-        annotated_image = action.overlay_on_image(screenshot)
-        if annotated_image is not None:
-            output_attachments.append(
-                _make_image_attachment(annotated_image, f"step_{step}_click_overlay", "output")
-            )
-
-        # Execute action and wait for UI to settle (wrapped in a span for tracing)
-        t_exec_start = time.time()
-        exec_failed = False
-
-        with raindrop.tool_span("execute_action") as span:
-            span.record_input({"action": action_desc, "step": step})
-
-            baseline = adapter.capture_screenshot()
-            should_continue = adapter.execute_action(action)
-
-            if not should_continue:
-                span.record_output({"success": False, "reason": "action_failed"})
-                exec_failed = True
-            else:
-                # Wait for screen to settle
-                if not getattr(action, "skip_screen_settle", False):
-                    adapter.wait_for_screen_settle(baseline=baseline)
-
-                new_screenshot = adapter.capture_screenshot()
-                screenshots.append(new_screenshot)
-                span.record_output({"success": True})
-
-        t_exec = time.time() - t_exec_start
-
-        if exec_failed:
-            if step_interaction:
-                step_interaction.finish(output=f"Action failed: {action_desc}")
-            termination_reason = "action_failure"
-            break
-        t_total = time.time() - t_step_start
-        step_timings.append((step, action_desc, t_total, t_predict, t_exec))
-
-        # Finish the step interaction with output attachments
-        if step_interaction:
-            if output_attachments:
-                step_interaction.add_attachments(output_attachments)
-            step_interaction.finish(
-                output=action_desc,
-                properties={
-                    "predict_time": t_predict,
-                    "exec_time": t_exec,
-                    "total_time": t_total,
-                },
-            )
-
-        console.print(
-            f"[blue]Step {step}[/] [dim]total={t_total:.1f}s predict={t_predict:.1f}s "
-            f"exec={t_exec:.1f}s[/]: {action_desc}"
-        )
-    else:
-        console.print(f"\n[yellow]Max steps ({max_steps}) reached[/]")
-
-    return final_action_desc, termination_reason
+    return on_step_start, on_step_complete, on_action_overlay, shared_state
 
 
 async def run_agent(
@@ -488,7 +391,7 @@ async def run_agent(
         return 1
 
     # Initialize Raindrop (optional)
-    raindrop_enabled = _init_raindrop()
+    raindrop_enabled = init_raindrop()
     if raindrop_enabled:
         console.print("[green]✓[/] Raindrop tracking enabled")
     else:
@@ -497,14 +400,14 @@ async def run_agent(
     # Setup signal handlers for graceful shutdown
     def signal_handler(sig: int, frame: object) -> None:
         console.print("\n[yellow]Interrupted, cleaning up...[/]")
-        _shutdown_raindrop()
+        shutdown_raindrop()
         sys.exit(130)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     # Generate conversation ID for Raindrop tracking
-    convo_id = cuid2()
+    convo_id = generate_id()
 
     # Raindrop interaction (will be set if raindrop is enabled)
     interaction = None
@@ -537,7 +440,7 @@ async def run_agent(
         console.print(f"[green]✓[/] Agent initialized with {cfg.model} (env={cfg.env})")
 
         # Start Raindrop interaction
-        if _raindrop_enabled:
+        if is_raindrop_enabled():
             interaction = raindrop.begin(
                 user_id=os.getenv("USER") or "system",
                 event="run_agent",
@@ -570,7 +473,7 @@ async def run_agent(
         agent.record_prior_action(nav_action_desc)
 
         # Create navigation step interaction with output screenshot
-        if _raindrop_enabled:
+        if is_raindrop_enabled():
             nav_interaction = raindrop.begin(
                 user_id=os.getenv("USER") or "system",
                 event="agent_loop",
@@ -579,7 +482,7 @@ async def run_agent(
                 properties={"step": 1, "action": "navigate"},
             )
             nav_interaction.add_attachments([
-                _make_image_attachment(initial_screenshot, "step_1_output", "output")
+                make_image_attachment(initial_screenshot, "step_1_output", "output")
             ])
             nav_interaction.finish(
                 output=nav_action_desc,
@@ -589,20 +492,37 @@ async def run_agent(
         # Run agent loop
         console.print(f"\n[bold]Running agent (max {cfg.max_steps} steps)...[/]\n")
 
-        # Track screenshots for WebJudge evaluation
-        screenshots = [initial_screenshot]
-
-        # Track step timings for summary: (step, action_desc, total, predict, exec)
-        # Navigation is step 1, no predict time (it's a setup action)
-        step_timings: list[tuple[int, str, float, float, float]] = [
-            (1, nav_action_desc, t_nav, 0.0, t_nav)
-        ]
-
-        # Run the agent loop (decorated with @raindrop.interaction)
-        final_action_desc, termination_reason = _run_agent_loop(
-            task, cfg.model, cfg.max_steps,
-            agent, adapter, screenshots, step_timings, convo_id
+        # Create callbacks for logging and Raindrop integration
+        on_step_start, on_step_complete, on_action_overlay, _ = _create_step_callbacks(
+            model=cfg.model,
+            convo_id=convo_id,
+            nav_step_offset=1,  # Navigation is step 1
         )
+
+        # Run the shared agent loop
+        loop_result = run_agent_loop(
+            agent=agent,
+            adapter=adapter,
+            task=task,
+            initial_screenshot=initial_screenshot,
+            max_steps=cfg.max_steps,
+            on_step_start=on_step_start,
+            on_step_complete=on_step_complete,
+            on_action_overlay=on_action_overlay,
+        )
+
+        # Extract results
+        screenshots = loop_result.screenshots
+        termination_reason = loop_result.termination_reason
+        final_action_desc = (
+            loop_result.step_results[-1].action_desc
+            if loop_result.step_results
+            else nav_action_desc
+        )
+
+        # Log termination
+        if termination_reason == "max_steps":
+            console.print(f"\n[yellow]Max steps ({cfg.max_steps}) reached[/]")
 
         # Cleanup browser
         if cfg.pool_name:
@@ -619,18 +539,24 @@ async def run_agent(
         table.add_column("Total", style="cyan", justify="right")
         table.add_column("Predict", style="yellow", justify="right")
         table.add_column("Exec", style="green", justify="right")
-        for step, action_desc, t_total, t_predict, t_exec in step_timings:
+
+        # Add navigation step
+        table.add_row("1", nav_action_desc, f"{t_nav:.1f}s", "-", f"{t_nav:.1f}s")
+
+        # Add loop steps
+        for result in loop_result.step_results:
+            display_step = result.step + 1  # Offset for navigation
             table.add_row(
-                str(step),
-                action_desc,
-                f"{t_total:.1f}s",
-                f"{t_predict:.1f}s" if t_predict > 0 else "-",
-                f"{t_exec:.1f}s" if t_exec > 0 else "-",
+                str(display_step),
+                result.action_desc,
+                f"{result.total_time:.1f}s",
+                f"{result.predict_time:.1f}s" if result.predict_time > 0 else "-",
+                f"{result.exec_time:.1f}s" if result.exec_time > 0 else "-",
             )
         console.print(table)
 
         # Flush raindrop before WebJudge so agent loop data is visible immediately
-        if _raindrop_enabled:
+        if is_raindrop_enabled():
             raindrop.flush()
 
         # WebJudge evaluation
@@ -646,7 +572,7 @@ async def run_agent(
                 initial_url=url,
             )
 
-            result = await _run_webjudge(webjudge, trajectory)
+            result = await run_webjudge_with_tracking(webjudge, trajectory)
 
             status = "[green]SUCCESS[/]" if result.success else "[red]FAILURE[/]"
             console.print(f"\nWebJudge Result: {status} (score={result.score})")
@@ -654,7 +580,7 @@ async def run_agent(
             console.print(f"\n[dim]Reasoning:[/]\n{result.reasoning[:500]}...")
 
             # Track webjudge result as a signal on the interaction
-            if _raindrop_enabled and interaction is not None:
+            if is_raindrop_enabled() and interaction is not None:
                 sentiment = "POSITIVE" if result.success else "NEGATIVE"
                 raindrop.track_signal(
                     event_id=interaction.id,
@@ -677,14 +603,14 @@ async def run_agent(
                 output=f"Completed: {final_action_desc}",
                 properties={
                     "termination_reason": termination_reason,
-                    "total_steps": len(step_timings),
+                    "total_steps": loop_result.steps_completed + 1,  # +1 for navigation
                 },
             )
 
         return 0
 
     finally:
-        _shutdown_raindrop()
+        shutdown_raindrop()
 
 
 def main() -> int:

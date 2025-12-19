@@ -12,21 +12,21 @@ Usage:
     cd kernel-tinker-rl
 
     # Evaluate on agent_auth tasks
-    uv run python -m scripts.evaluate \\
-        --env agent_auth \\
-        --pool-name my-browser-pool \\
+    uv run python -m scripts.evaluate \
+        --env agent_auth \
+        --pool-name my-browser-pool \
         --max-tasks 10
 
     # Evaluate with a specific model
-    uv run python -m scripts.evaluate \\
-        --env agent_auth \\
-        --model openrouter/qwen/qwen3-vl-8b-instruct \\
+    uv run python -m scripts.evaluate \
+        --env agent_auth \
+        --model openrouter/qwen/qwen3-vl-8b-instruct \
         --max-tasks 5
 
     # Output results to JSON file
-    uv run python -m scripts.evaluate \\
-        --env agent_auth \\
-        --max-tasks 10 \\
+    uv run python -m scripts.evaluate \
+        --env agent_auth \
+        --max-tasks 10 \
         --output results.json
 
     # Dry run (print config without running)
@@ -35,6 +35,7 @@ Usage:
 Environment Variables:
     KERNEL_API_KEY: Required for Kernel browser API
     OPENROUTER_API_KEY: Required for WebJudge and VLM inference
+    RAINDROP_WRITE_KEY: Optional, enables Raindrop AI tracking
 """
 
 from __future__ import annotations
@@ -47,18 +48,25 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from dotenv import load_dotenv
 from kernel import Kernel
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from core.agent import AgentConfig, QwenAgent
+from core.agent_loop import run_agent_loop
 from core.browser import KernelBrowserAdapter
 from core.reward_models import Trajectory, WebJudge
-from core.utils import resize_image
+from core.tracking import (
+    begin_episode,
+    finish_episode,
+    generate_id,
+    init_raindrop,
+    is_raindrop_enabled,
+    shutdown_raindrop,
+    track_webjudge_signal,
+)
 
 console = Console()
 
@@ -67,7 +75,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Available environments
-AVAILABLE_ENVS = ["agent_auth"]
+AVAILABLE_ENVS = ["osworld", "agent_auth"]
 
 # Default models
 DEFAULT_AGENT_MODEL = "qwen/qwen3-vl-8b-instruct"
@@ -92,6 +100,7 @@ class EvalConfig:
 
     # Browser pool parameters
     pool_name: str = "eval-browser-pool"
+    pool_size: int | None = None  # None means use pool's configured size
     acquire_timeout_seconds: int = 60
     image_max_size: int = 512
 
@@ -114,9 +123,9 @@ def parse_args() -> EvalConfig:
     # Environment selection
     parser.add_argument(
         "--env",
-        default="agent_auth",
+        default="osworld",
         choices=AVAILABLE_ENVS,
-        help=f"Environment to use (default: agent_auth). Available: {AVAILABLE_ENVS}",
+        help=f"Environment to use (default: osworld). Available: {AVAILABLE_ENVS}",
     )
 
     # Model parameters
@@ -147,6 +156,12 @@ def parse_args() -> EvalConfig:
         help="Browser pool name (default: eval-browser-pool)",
     )
     parser.add_argument(
+        "--pool-size",
+        type=int,
+        default=None,
+        help="Number of concurrent tasks (default: pool's configured size)",
+    )
+    parser.add_argument(
         "--acquire-timeout", type=int, default=60, help="Browser acquire timeout (default: 60)"
     )
     parser.add_argument(
@@ -170,6 +185,7 @@ def parse_args() -> EvalConfig:
         max_steps=args.max_steps,
         task_file=args.task_file,
         pool_name=args.pool_name,
+        pool_size=args.pool_size,
         acquire_timeout_seconds=args.acquire_timeout,
         image_max_size=args.image_max_size,
         output_file=args.output,
@@ -191,6 +207,7 @@ def print_config(cfg: EvalConfig) -> None:
     table.add_row("Max Steps", str(cfg.max_steps))
     table.add_row("Task File", cfg.task_file or "(default for env)")
     table.add_row("Pool Name", cfg.pool_name)
+    table.add_row("Pool Size", str(cfg.pool_size or "(query from pool)"))
     table.add_row("Output File", cfg.output_file or "(stdout only)")
 
     console.print(table)
@@ -198,20 +215,30 @@ def print_config(cfg: EvalConfig) -> None:
 
 def get_tasks_and_system_prompt(cfg: EvalConfig):
     """Get tasks and system prompt for the selected environment."""
-    if cfg.env == "agent_auth":
+    if cfg.env == "osworld":
+        from examples.osworld.actions import OSWORLD_ACTIONS
+        from examples.osworld.config import get_osworld_system_prompt
+        from examples.osworld.dataset import load_tasks
+
+        task_file = cfg.task_file or "examples/osworld/tasks.jsonl"
+        tasks = load_tasks(task_file, limit=cfg.max_tasks)
+        system_prompt = get_osworld_system_prompt()
+        extra_actions = OSWORLD_ACTIONS
+
+        return tasks, system_prompt, extra_actions
+
+    elif cfg.env == "agent_auth":
+        from examples.agent_auth.actions import AGENT_AUTH_ACTIONS
         from examples.agent_auth.config import get_agent_auth_system_prompt
         from examples.agent_auth.dataset import load_tasks
 
         task_file = cfg.task_file or "examples/agent_auth/tasks.jsonl"
         tasks = load_tasks(task_file, limit=cfg.max_tasks)
         system_prompt = get_agent_auth_system_prompt()
-
-        # Get extra actions
-        from examples.agent_auth.actions import AGENT_AUTH_ACTIONS
-
         extra_actions = AGENT_AUTH_ACTIONS
 
         return tasks, system_prompt, extra_actions
+
     else:
         raise ValueError(f"Unknown environment: {cfg.env}")
 
@@ -219,17 +246,18 @@ def get_tasks_and_system_prompt(cfg: EvalConfig):
 async def run_single_episode(
     task,
     kernel: Kernel,
-    agent: QwenAgent,
+    agent_config: AgentConfig,
     cfg: EvalConfig,
 ) -> tuple[Trajectory, dict]:
     """
     Run a single evaluation episode.
 
+    Creates its own agent instance for thread safety in concurrent execution.
+
     Returns:
         Tuple of (trajectory, metadata)
     """
-    screenshots = []
-    action_history = []
+    task_label = f"{task.domain} ({task.id})"
     metadata = {
         "task_id": task.id,
         "initial_url": task.initial_url,
@@ -238,12 +266,16 @@ async def run_single_episode(
         "terminal_action": None,
     }
 
+    # Create agent for this episode (each concurrent task gets its own)
+    agent = QwenAgent(config=agent_config)
+
     # Acquire browser from pool
     browser = kernel.browser_pools.acquire(
         cfg.pool_name,
         acquire_timeout_seconds=cfg.acquire_timeout_seconds,
     )
     adapter = KernelBrowserAdapter(kernel, browser)
+    console.print(f"    [dim]{task_label}: browser acquired[/]")
 
     try:
         await adapter.start_heartbeat()
@@ -251,72 +283,41 @@ async def run_single_episode(
         # Navigate to initial URL
         try:
             adapter.navigate(task.initial_url)
+            console.print(f"    [dim]{task_label}: navigated[/]")
         except Exception as e:
             metadata["error"] = f"Navigation failed: {e}"
             return Trajectory(
                 task_id=task.id,
                 task=task.task,
-                action_history=action_history,
-                screenshots=screenshots,
+                action_history=[],
+                screenshots=[],
                 initial_url=task.initial_url,
             ), metadata
 
         # Initial screenshot
-        screenshot = adapter.capture_screenshot()
-        screenshot_resized = resize_image(screenshot, max_size=cfg.image_max_size)
-        screenshots.append(screenshot_resized.copy())
-        action_history.append(f"Navigate to {task.initial_url}")
+        initial_screenshot = adapter.capture_screenshot()
 
-        # Reset agent for new episode
-        agent.reset()
+        # Run the shared agent loop
+        loop_result = run_agent_loop(
+            agent=agent,
+            adapter=adapter,
+            task=task.task,
+            initial_screenshot=initial_screenshot,
+            max_steps=cfg.max_steps,
+            image_max_size=cfg.image_max_size,
+        )
 
-        # Run agent loop
-        for step in range(1, cfg.max_steps + 1):
-            metadata["steps"] = step
+        # Build action history (prepend navigation)
+        action_history = [f"Navigate to {task.initial_url}"] + loop_result.action_history
 
-            # Get action from agent
-            try:
-                action = agent.predict(task.task, screenshot_resized)
-            except Exception as e:
-                metadata["error"] = f"Agent error at step {step}: {e}"
-                break
+        # Update metadata from loop result
+        metadata["steps"] = loop_result.steps_completed
+        metadata["terminal_action"] = loop_result.terminal_action
+        if loop_result.error:
+            metadata["error"] = loop_result.error
 
-            if action is None:
-                metadata["error"] = f"Failed to parse action at step {step}"
-                break
-
-            # Record action
-            action_desc = action.to_description()
-            if action.model_description:
-                action_desc = f"{action.model_description} ({action_desc})"
-            action_history.append(action_desc)
-
-            # Check for terminal action
-            if getattr(action, "is_terminal", False):
-                metadata["terminal_action"] = getattr(action, "action_type", "unknown")
-                break
-
-            # Execute action
-            try:
-                baseline = adapter.capture_screenshot()
-                should_continue = adapter.execute_action(action)
-
-                if not should_continue:
-                    metadata["terminal_action"] = getattr(action, "action_type", "unknown")
-                    break
-
-                # Wait for screen to settle
-                if not getattr(action, "skip_screen_settle", False):
-                    adapter.wait_for_screen_settle(baseline=baseline)
-
-                # Capture new screenshot
-                screenshot = adapter.capture_screenshot()
-                screenshot_resized = resize_image(screenshot, max_size=cfg.image_max_size)
-                screenshots.append(screenshot_resized.copy())
-
-            except Exception as e:
-                metadata["error"] = f"Execution error at step {step}: {e}"
-                break
+        term_info = f", terminal={loop_result.terminal_action}" if loop_result.terminal_action else ""
+        console.print(f"    [dim]{task_label}: {loop_result.steps_completed} steps{term_info}[/]")
 
     finally:
         try:
@@ -331,7 +332,7 @@ async def run_single_episode(
         task_id=task.id,
         task=task.task,
         action_history=action_history,
-        screenshots=screenshots,
+        screenshots=loop_result.screenshots,
         initial_url=task.initial_url,
     )
 
@@ -365,6 +366,16 @@ async def eval_main(cfg: EvalConfig) -> int:
         return 1
     console.print("  ✓ OPENROUTER_API_KEY")
 
+    # Initialize Raindrop (optional)
+    raindrop_enabled = init_raindrop()
+    if raindrop_enabled:
+        console.print("  ✓ Raindrop tracking enabled")
+    else:
+        console.print("  [dim]ℹ Raindrop tracking disabled (no RAINDROP_WRITE_KEY)[/]")
+
+    # Generate batch ID for Raindrop tracking
+    batch_id = generate_id()
+
     if cfg.dry_run:
         console.print("\n[yellow]Dry run mode - not executing[/]")
         return 0
@@ -380,6 +391,20 @@ async def eval_main(cfg: EvalConfig) -> int:
     kernel = Kernel()
     console.print("  ✓ Kernel client")
 
+    # Query pool size from Kernel if not specified
+    pool_size = cfg.pool_size
+    if pool_size is None:
+        try:
+            pool_info = kernel.browser_pools.retrieve(cfg.pool_name)
+            pool_size = pool_info.browser_pool_config.size
+            console.print(f"  ✓ Pool size: {pool_size} (from pool config)")
+        except Exception as e:
+            console.print(f"[yellow]  ⚠ Could not query pool size: {e}[/]")
+            pool_size = 1  # Fall back to sequential execution
+            console.print(f"  → Falling back to pool size: {pool_size}")
+    else:
+        console.print(f"  ✓ Pool size: {pool_size} (from --pool-size)")
+
     webjudge = WebJudge(model=cfg.webjudge_model, api_key=openrouter_key)
     console.print(f"  ✓ WebJudge ({cfg.webjudge_model})")
 
@@ -389,36 +414,50 @@ async def eval_main(cfg: EvalConfig) -> int:
         system_prompt=system_prompt,
         extra_actions=extra_actions,
     )
-    agent = QwenAgent(config=agent_config)
-    console.print(f"  ✓ Agent ({cfg.agent_model})")
+    console.print(f"  ✓ Agent config ({cfg.agent_model})")
 
     # Run evaluation
-    console.print("\n[bold blue]Running evaluation...[/]")
+    console.print(f"\n[bold blue]Running evaluation ({pool_size} concurrent)...[/]")
 
-    results = []
+    results: list[dict] = []
+    results_lock = asyncio.Lock()
     success_count = 0
-    total_time = 0
+    completed_count = 0
+    t_eval_start = time.perf_counter()
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task_progress = progress.add_task("Evaluating...", total=len(tasks))
+    # Semaphore to limit concurrency to pool size
+    semaphore = asyncio.Semaphore(pool_size)
 
-        for i, task in enumerate(tasks):
-            progress.update(
-                task_progress,
-                description=f"[{i+1}/{len(tasks)}] {task.domain}",
-            )
+    async def run_and_evaluate(task, task_idx: int) -> dict:
+        """Run a single episode and evaluate it, respecting the semaphore."""
+        nonlocal success_count, completed_count
 
+        async with semaphore:
+            console.print(f"  [dim]→ Starting:[/] {task.domain} ({task.id[:8]}...)")
             t_start = time.perf_counter()
+
+            # Start Raindrop interaction for this episode
+            # Each task gets its own convo_id, with batch_id as a grouping property
+            episode_convo_id = generate_id()
+            interaction = begin_episode(
+                task=task.task,
+                convo_id=episode_convo_id,
+                properties={
+                    "batch_id": batch_id,
+                    "task_id": task.id,
+                    "task_idx": task_idx,
+                    "domain": task.domain,
+                    "initial_url": task.initial_url,
+                    "env": cfg.env,
+                    "model": cfg.agent_model,
+                },
+            )
 
             try:
                 trajectory, metadata = await run_single_episode(
                     task=task,
                     kernel=kernel,
-                    agent=agent,
+                    agent_config=agent_config,
                     cfg=cfg,
                 )
 
@@ -445,7 +484,6 @@ async def eval_main(cfg: EvalConfig) -> int:
                 metadata = {"error": str(e)}
 
             t_elapsed = time.perf_counter() - t_start
-            total_time += t_elapsed
 
             result = {
                 "task_id": task.id,
@@ -458,16 +496,49 @@ async def eval_main(cfg: EvalConfig) -> int:
                 "error": metadata.get("error"),
                 "duration_seconds": round(t_elapsed, 2),
             }
-            results.append(result)
 
-            if success:
-                success_count += 1
+            # Finish Raindrop interaction and track WebJudge signal
+            finish_episode(
+                interaction=interaction,
+                output=f"{'Success' if success else 'Failure'}: {reasoning[:200]}",
+                properties={
+                    "success": success,
+                    "score": score,
+                    "steps": metadata.get("steps", 0),
+                    "duration_seconds": round(t_elapsed, 2),
+                },
+            )
+            track_webjudge_signal(
+                interaction=interaction,
+                success=success,
+                score=score,
+                reasoning=reasoning,
+                webjudge_model=cfg.webjudge_model,
+            )
 
-            if cfg.verbose:
-                status = "[green]SUCCESS[/]" if success else "[red]FAILURE[/]"
-                console.print(f"  {task.domain}: {status} ({t_elapsed:.1f}s)")
+            # Thread-safe update of counters and results
+            async with results_lock:
+                completed_count += 1
+                if success:
+                    success_count += 1
+                results.append(result)
 
-            progress.advance(task_progress)
+                status = "[green]✓[/]" if success else "[red]✗[/]"
+                steps_info = f"{metadata.get('steps', 0)} steps"
+                console.print(
+                    f"  {status} [{completed_count}/{len(tasks)}] {task.domain}: "
+                    f"{steps_info}, {t_elapsed:.1f}s"
+                )
+
+            return result
+
+    # Run all tasks concurrently with TaskGroup
+    console.print(f"  Starting {len(tasks)} tasks...")
+    async with asyncio.TaskGroup() as tg:
+        for i, task in enumerate(tasks):
+            tg.create_task(run_and_evaluate(task, i))
+
+    total_time = time.perf_counter() - t_eval_start
 
     # Print summary
     console.print("\n" + "=" * 60)
@@ -479,13 +550,16 @@ async def eval_main(cfg: EvalConfig) -> int:
     summary_table.add_column("Value")
 
     success_rate = success_count / len(tasks) * 100 if tasks else 0
-    avg_time = total_time / len(tasks) if tasks else 0
+    # Calculate avg from individual task durations (more accurate for parallel execution)
+    avg_task_duration = (
+        sum(r["duration_seconds"] for r in results) / len(results) if results else 0
+    )
 
     summary_table.add_row("Total Tasks", str(len(tasks)))
     summary_table.add_row("Successful", str(success_count))
     summary_table.add_row("Success Rate", f"{success_rate:.1f}%")
-    summary_table.add_row("Total Time", f"{total_time:.1f}s")
-    summary_table.add_row("Avg Time/Task", f"{avg_time:.1f}s")
+    summary_table.add_row("Total Time", f"{total_time:.1f}s (wall clock)")
+    summary_table.add_row("Avg Time/Task", f"{avg_task_duration:.1f}s")
 
     console.print(summary_table)
 
@@ -511,6 +585,11 @@ async def eval_main(cfg: EvalConfig) -> int:
             json.dump(output_data, f, indent=2)
 
         console.print(f"\n  Results written to: {cfg.output_file}")
+
+    # Flush and shutdown Raindrop
+    if is_raindrop_enabled():
+        console.print(f"\n[dim]ℹ Raindrop batch_id: {batch_id}[/]")
+    shutdown_raindrop()
 
     return 0
 

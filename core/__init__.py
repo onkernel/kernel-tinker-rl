@@ -27,9 +27,24 @@ from .actions import (
     parse_action_from_response,
 )
 from .agent import AgentConfig, QwenAgent
+from .agent_loop import AgentLoopResult, StepResult, run_agent_loop
 from .browser import KernelBrowserAdapter, MockBrowserAdapter, acquired_browser
 from .prompts import build_system_prompt, get_system_prompt
 from .reward_models import EvaluationResult, RewardModel, Trajectory, WebJudge, WebJudgeResult
+from .tracking import (
+    begin_episode,
+    create_step_callbacks,
+    finish_episode,
+    flush_raindrop,
+    generate_id,
+    image_to_data_url,
+    init_raindrop,
+    is_raindrop_enabled,
+    make_image_attachment,
+    run_webjudge_with_tracking,
+    shutdown_raindrop,
+    track_webjudge_signal,
+)
 from .utils import (
     encode_image,
     load_image,
@@ -43,6 +58,10 @@ __all__ = [
     # Agent
     "QwenAgent",
     "AgentConfig",
+    # Agent Loop
+    "run_agent_loop",
+    "AgentLoopResult",
+    "StepResult",
     # Actions
     "Action",
     "LeftClickAction",
@@ -78,4 +97,17 @@ __all__ = [
     "pixel_to_normalized",
     "normalized_to_pixel",
     "setup_environment",
+    # Tracking
+    "init_raindrop",
+    "shutdown_raindrop",
+    "is_raindrop_enabled",
+    "flush_raindrop",
+    "generate_id",
+    "image_to_data_url",
+    "make_image_attachment",
+    "create_step_callbacks",
+    "begin_episode",
+    "finish_episode",
+    "track_webjudge_signal",
+    "run_webjudge_with_tracking",
 ]
