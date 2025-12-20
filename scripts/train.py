@@ -11,24 +11,16 @@ using Tinker's RL infrastructure with:
 Usage:
     cd kernel-tinker-rl
 
-    # Agent Auth training with browser pool
+    # Agent Auth training with browser pool (uses 48 browsers by default: 12 tasks × 4 rollouts)
     uv run python -m scripts.train \
         --env agent_auth \
-        --pool-name my-browser-pool \
-        --batch-size 4 \
-        --group-size 2
+        --pool-name datagen-bp
 
     # With W&B logging
     uv run python -m scripts.train \
         --env agent_auth \
-        --pool-name my-browser-pool \
-        --wandb-project my-project
-
-    # Custom task file
-    uv run python -m scripts.train \
-        --env agent_auth \\
-        --task-file examples/agent_auth/tasks.jsonl \
-        --pool-name my-browser-pool
+        --pool-name datagen-bp \
+        --wandb-project agent-auth
 
     # Dry run (print config without running)
     uv run python -m scripts.train --dry-run
@@ -38,6 +30,7 @@ Environment Variables:
     TINKER_API_KEY: Required for Tinker RL training
     OPENROUTER_API_KEY: Required for WebJudge (gpt-5-mini)
     WANDB_API_KEY: Required for --wandb-project
+    RAINDROP_WRITE_KEY: Optional, enables Raindrop AI tracking
 """
 
 from __future__ import annotations
@@ -58,6 +51,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 from tinker_cookbook.rl import train
+
+from core.tracking import generate_id, init_raindrop, is_raindrop_enabled, shutdown_raindrop
 
 console = Console()
 
@@ -85,8 +80,8 @@ class TrainConfig:
     learning_rate: float = 4e-5
 
     # Training parameters
-    batch_size: int = 4  # Tasks per batch
-    group_size: int = 2  # Rollouts per task (for GRPO baseline)
+    batch_size: int = 12  # Tasks per batch
+    group_size: int = 4  # Rollouts per task (for GRPO baseline)
     max_steps: int = 5  # Max actions per episode
     max_tokens: int = 512  # Max tokens per VLM response
 
@@ -147,8 +142,8 @@ def parse_args() -> TrainConfig:
     )
 
     # Training parameters
-    parser.add_argument("--batch-size", type=int, default=4, help="Tasks per batch (default: 4)")
-    parser.add_argument("--group-size", type=int, default=2, help="Rollouts per task (default: 2)")
+    parser.add_argument("--batch-size", type=int, default=12, help="Tasks per batch (default: 12)")
+    parser.add_argument("--group-size", type=int, default=4, help="Rollouts per task (default: 4)")
     parser.add_argument(
         "--max-steps", type=int, default=5, help="Max actions per episode (default: 5)"
     )
@@ -264,7 +259,7 @@ def print_config(cfg: TrainConfig) -> None:
     console.print(table)
 
 
-def get_dataset_builder(cfg: TrainConfig):
+def get_dataset_builder(cfg: TrainConfig, raindrop_batch_id: str | None = None):
     """Get the appropriate dataset builder for the selected environment."""
     if cfg.env == "agent_auth":
         from examples.agent_auth.environment import AgentAuthRLDatasetBuilder
@@ -286,6 +281,7 @@ def get_dataset_builder(cfg: TrainConfig):
             max_screenshots_in_context=cfg.max_screenshots_in_context,
             webjudge_model=cfg.webjudge_model,
             webjudge_enabled=cfg.webjudge_enabled,
+            raindrop_batch_id=raindrop_batch_id,
         )
     else:
         raise ValueError(f"Unknown environment: {cfg.env}")
@@ -335,6 +331,16 @@ async def train_main(cfg: TrainConfig) -> int:
         console.print("\n[yellow]Dry run mode - not executing[/]")
         return 0
 
+    # Initialize Raindrop (optional)
+    raindrop_enabled = init_raindrop()
+    if raindrop_enabled:
+        console.print("  ✓ Raindrop tracking enabled")
+    else:
+        console.print("  [dim]ℹ Raindrop tracking disabled (no RAINDROP_WRITE_KEY)[/]")
+
+    # Generate batch ID for Raindrop tracking
+    batch_id = generate_id()
+
     # Build run name
     model_name_short = cfg.model_name.lower().replace("/", "-")
     date_and_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
@@ -359,7 +365,8 @@ async def train_main(cfg: TrainConfig) -> int:
 
     # Build dataset builder
     console.print("\n[bold blue]Building dataset...[/]")
-    dataset_builder = get_dataset_builder(cfg)
+    raindrop_batch_id = batch_id if raindrop_enabled else None
+    dataset_builder = get_dataset_builder(cfg, raindrop_batch_id=raindrop_batch_id)
 
     # Build training config
     console.print("\n[bold blue]Starting training...[/]")
@@ -389,6 +396,11 @@ async def train_main(cfg: TrainConfig) -> int:
     except Exception as e:
         console.print(f"\n[red]✗ Training failed: {e}[/]")
         raise
+    finally:
+        # Flush and shutdown Raindrop
+        if is_raindrop_enabled():
+            console.print(f"\n[dim]ℹ Raindrop batch_id: {batch_id}[/]")
+        shutdown_raindrop()
 
 
 def main() -> int:

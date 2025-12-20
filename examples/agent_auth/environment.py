@@ -44,6 +44,13 @@ from core.actions import TerminateAction, parse_action_from_response
 from core.browser import KernelBrowserAdapter
 from core.reward_models.webjudge import Trajectory as WebJudgeTrajectory
 from core.reward_models.webjudge import WebJudge
+from core.tracking import (
+    begin_episode,
+    finish_episode,
+    generate_id,
+    is_raindrop_enabled,
+    track_webjudge_signal,
+)
 from core.utils import resize_image
 
 from .actions import AGENT_AUTH_ACTIONS, FoundInputsAction
@@ -63,12 +70,7 @@ AGENT_AUTH_EVALUATION_CRITERIA = """1. The agent must have navigated to an authe
 
 # Default model for agent auth training
 MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct"
-RENDERER_NAME = "qwen3_vl_disable_thinking"
-
-
-def get_renderer(renderer_name: str, tokenizer, image_processor) -> renderers.Renderer:
-    """Get the appropriate renderer for the model."""
-    return renderers.get_renderer(renderer_name, tokenizer, image_processor)
+RENDERER_NAME = "qwen3_vl_instruct"
 
 
 @dataclass
@@ -141,10 +143,10 @@ class AgentAuthEnv(Env):
                 self.config.pool_name,
                 acquire_timeout_seconds=self.config.acquire_timeout_seconds,
             )
-            self.adapter = KernelBrowserAdapter(self.kernel, browser)
+            self.adapter = KernelBrowserAdapter(self.kernel, browser, reset_on_init=True)
 
             # Start heartbeat to keep browser alive during long VLM inference
-            self.adapter.start_heartbeat_sync()
+            self.adapter.start_heartbeat_sync(task_label=self.task.domain)
 
             # Navigate to domain
             url = self.task.initial_url
@@ -348,8 +350,9 @@ class AgentAuthEnv(Env):
         if self.adapter is not None:
             try:
                 self.adapter.stop_heartbeat_sync()
+                reuse = not self._browser_corrupted and not self.adapter._should_not_reuse
                 self.kernel.browser_pools.release(
-                    self.config.pool_name, session_id=self.adapter.session_id, reuse=True
+                    self.config.pool_name, session_id=self.adapter.session_id, reuse=reuse
                 )
             except Exception as e:
                 logger.warning(f"Failed to release browser: {e}")
@@ -377,10 +380,11 @@ class AgentAuthEnv(Env):
         if self.adapter is not None:
             try:
                 self.adapter.stop_heartbeat_sync()
+                reuse = not self._browser_corrupted and not self.adapter._should_not_reuse
                 self.kernel.browser_pools.release(
                     self.config.pool_name,
                     session_id=self.adapter.session_id,
-                    reuse=not self._browser_corrupted,
+                    reuse=reuse,
                 )
             except Exception:
                 pass
@@ -391,10 +395,11 @@ class AgentAuthEnv(Env):
         if self.adapter is not None:
             try:
                 self.adapter.stop_heartbeat_sync()
+                reuse = not self._browser_corrupted and not self.adapter._should_not_reuse
                 self.kernel.browser_pools.release(
                     self.config.pool_name,
                     session_id=self.adapter.session_id,
-                    reuse=not self._browser_corrupted,
+                    reuse=reuse,
                 )
             except Exception:
                 pass
@@ -420,6 +425,10 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
     # WebJudge for reward computation
     webjudge: WebJudge | None = None
 
+    # Raindrop tracking
+    raindrop_batch_id: str | None = None
+    webjudge_model: str = "openai/gpt-5-mini"
+
     async def make_envs(self) -> Sequence[Env]:
         """Create num_envs environments for the same task."""
         return [
@@ -443,11 +452,26 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
 
         Runs WebJudge on each trajectory and returns (reward, metrics) tuples.
         Uses finally blocks to ensure cleanup is always called.
+        Tracks episodes and WebJudge signals to Raindrop if enabled.
         """
         results: list[tuple[float, Metrics]] = []
 
         for traj, env in zip(trajectory_group, env_group):
             assert isinstance(env, AgentAuthEnv)
+
+            # Start Raindrop interaction for this episode
+            interaction = None
+            if self.raindrop_batch_id and is_raindrop_enabled():
+                interaction = begin_episode(
+                    task=env.task.task,
+                    convo_id=self.raindrop_batch_id,
+                    properties={
+                        "task_id": env.task.id,
+                        "domain": env.task.domain,
+                        "initial_url": env.task.initial_url,
+                        "steps": env.step_count,
+                    },
+                )
 
             try:
                 # Build WebJudge trajectory
@@ -468,6 +492,16 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
                             f"(score={wj_result.score})"
                         )
 
+                        # Track WebJudge signal to Raindrop
+                        if interaction is not None:
+                            track_webjudge_signal(
+                                interaction=interaction,
+                                success=wj_result.success,
+                                score=wj_result.score,
+                                reasoning=wj_result.reasoning,
+                                webjudge_model=self.webjudge_model,
+                            )
+
                     except Exception as e:
                         logger.warning(f"WebJudge evaluation failed: {e}")
                         reward = 0.0
@@ -485,6 +519,19 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
                     else:
                         reward = 0.0
                         metrics = {"no_terminal": 1.0}
+
+                # Finish Raindrop interaction
+                if interaction is not None:
+                    action_summary = " → ".join(env.action_history[-3:]) if env.action_history else "No actions"
+                    finish_episode(
+                        interaction=interaction,
+                        output=action_summary,
+                        properties={
+                            "reward": reward,
+                            "steps": env.step_count,
+                            **metrics,
+                        },
+                    )
 
                 results.append((reward, metrics))
 
@@ -515,7 +562,9 @@ class AgentAuthRLDataset(RLDataset):
         group_size: int,
         system_prompt: str | None = None,
         webjudge: WebJudge | None = None,
+        webjudge_model: str = "openai/gpt-5-mini",
         seed: int = 42,
+        raindrop_batch_id: str | None = None,
     ):
         self.tasks = tasks
         self.kernel = kernel
@@ -525,6 +574,8 @@ class AgentAuthRLDataset(RLDataset):
         self.group_size = group_size
         self.system_prompt = system_prompt
         self.webjudge = webjudge
+        self.webjudge_model = webjudge_model
+        self.raindrop_batch_id = raindrop_batch_id
 
         # Shuffle tasks
         rng = random.Random(seed)
@@ -546,6 +597,8 @@ class AgentAuthRLDataset(RLDataset):
                 num_envs=self.group_size,
                 system_prompt=self.system_prompt,
                 webjudge=self.webjudge,
+                raindrop_batch_id=self.raindrop_batch_id,
+                webjudge_model=self.webjudge_model,
             )
             for task in batch_tasks
         ]
@@ -588,6 +641,9 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
     webjudge_enabled: bool = True
     webjudge_criteria: str = AGENT_AUTH_EVALUATION_CRITERIA
 
+    # Raindrop config
+    raindrop_batch_id: str | None = None
+
     async def __call__(self) -> tuple[AgentAuthRLDataset, None]:
         """Build and return the dataset."""
         # Load tasks
@@ -603,7 +659,7 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
         # Initialize renderer
         tokenizer = get_tokenizer(self.model_name)
         image_processor = get_image_processor(self.model_name)
-        renderer = get_renderer(self.renderer_name, tokenizer, image_processor)
+        renderer = renderers.get_renderer(self.renderer_name, tokenizer, image_processor)
 
         # Initialize WebJudge
         webjudge: WebJudge | None = None
@@ -638,7 +694,9 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
             group_size=self.group_size,
             system_prompt=get_agent_auth_system_prompt(),
             webjudge=webjudge,
+            webjudge_model=self.webjudge_model,
             seed=self.seed,
+            raindrop_batch_id=self.raindrop_batch_id,
         )
 
         return dataset, None

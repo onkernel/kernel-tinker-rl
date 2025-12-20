@@ -14,7 +14,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "raindrop-ai>=0.0.34",
     "rich>=14.2.0",
-    "tinker-cookbook>=0.1.0",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git",
     "websockets>=15.0.1",
 ]
 
