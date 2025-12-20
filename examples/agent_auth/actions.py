@@ -21,7 +21,6 @@ class FoundField:
 
     name: str
     type: FieldType
-    selector: str
     placeholder: str = ""
     required: bool = True
 
@@ -63,11 +62,6 @@ class FoundInputsAction(Action):
                         "description": "Field type",
                         "example": "email",
                     },
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector for the field",
-                        "example": "input#email",
-                    },
                     "placeholder": {
                         "type": "string",
                         "description": "Field placeholder",
@@ -80,7 +74,7 @@ class FoundInputsAction(Action):
                         "example": True,
                     },
                 },
-                "required": ["name", "type", "selector"],
+                "required": ["name", "type", "required"],
             },
             "required": True,
         }
@@ -93,7 +87,6 @@ class FoundInputsAction(Action):
             FoundField(
                 name=f.get("name", ""),
                 type=f.get("type", "text"),
-                selector=f.get("selector", ""),
                 placeholder=f.get("placeholder", ""),
                 required=f.get("required", True),
             )
@@ -112,7 +105,6 @@ class FoundInputsAction(Action):
                 {
                     "name": f.name,
                     "type": f.type,
-                    "selector": f.selector,
                     "placeholder": f.placeholder,
                     "required": f.required,
                 }

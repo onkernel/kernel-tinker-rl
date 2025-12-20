@@ -374,7 +374,7 @@ def _run_episode_sync(
     try:
         adapter.navigate(task.initial_url)
         t_nav = time.perf_counter() - t_nav_start
-        console.print(f"    {ts()} [dim]{task_label}: navigate ({t_nav:.1f}s) → {task.initial_url}[/]")
+        console.print(f"    {ts()} [dim]{task_label}: step=1 action=navigate time={t_nav:.1f}s url={task.initial_url}[/]")
     except Exception as e:
         metadata["error"] = f"Navigation failed: {e}"
         return Trajectory(
@@ -413,7 +413,8 @@ def _run_episode_sync(
         # Always log to console with timing
         display_step = step + 1  # Navigation is step 1
         if step_result.error or step_result.action is None:
-            console.print(f"    {ts()} [dim]{task_label}: step {display_step} error: {step_result.error or 'Failed to parse action'}[/]")
+            error_msg = step_result.error or 'Failed to parse action'
+            console.print(f"    {ts()} [dim]{task_label}: step={display_step} error={error_msg}[/]")
         elif step_result.action_desc:
             desc = step_result.action_desc
             if len(desc) > 80:
@@ -422,7 +423,7 @@ def _run_episode_sync(
                 timing = f"total={step_result.total_time:.1f}s predict={step_result.predict_time:.1f}s"
             else:
                 timing = f"total={step_result.total_time:.1f}s predict={step_result.predict_time:.1f}s exec={step_result.exec_time:.1f}s"
-            console.print(f"    {ts()} [dim]{task_label}: step {display_step} {timing}: {desc}[/]")
+            console.print(f"    {ts()} [dim]{task_label}: step={display_step} {timing} action={desc}[/]")
         # Also track to Raindrop if enabled
         if raindrop_on_step_complete:
             raindrop_on_step_complete(step, step_result)
@@ -512,7 +513,7 @@ async def run_single_episode(
         task.id,
     )
 
-    console.print(f"    {ts()} [dim]{task_label}: browser acquired ({acquire_time:.1f}s)[/]")
+    console.print(f"    {ts()} [dim]{task_label}: acquired=browser time={acquire_time:.1f}s[/]")
 
     try:
         # Start heartbeat in a dedicated background THREAD (not asyncio task)

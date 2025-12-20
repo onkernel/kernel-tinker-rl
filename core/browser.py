@@ -567,10 +567,14 @@ class BrowserHeartbeat:
                 
                 # Console log for heartbeat
                 if self.task_label:
-                    status = "heartbeat" if result else "[red]heartbeat failed[/]"
-                    console.print(
-                        f"    {self._format_ts()} [dim]{self.task_label}: {status} browser={self.session_id}[/]"
-                    )
+                    if result:
+                        console.print(
+                            f"    {self._format_ts()} [dim]{self.task_label}: heartbeat=ok browser={self.session_id}[/]"
+                        )
+                    else:
+                        console.print(
+                            f"    {self._format_ts()} [red]{self.task_label}: heartbeat=failed browser={self.session_id}[/]"
+                        )
                 
                 if not result:
                     # Connection failed, try to reconnect
