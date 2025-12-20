@@ -109,8 +109,8 @@ def flush_raindrop() -> None:
 AttachmentRole = Literal["input", "output", "context"]
 
 # Max image size for raindrop attachments (keeps events under 1MB limit)
-RAINDROP_MAX_IMAGE_SIZE = 512
-RAINDROP_IMAGE_QUALITY = 60
+RAINDROP_MAX_IMAGE_SIZE = 1024
+RAINDROP_IMAGE_QUALITY = 75
 
 
 def image_to_data_url(
@@ -306,10 +306,11 @@ def track_webjudge_signal(
     """
     if interaction is None or not _raindrop_enabled:
         return
+    signal_name = "webjudge_success" if success else "webjudge_failure"
     sentiment = "POSITIVE" if success else "NEGATIVE"
     raindrop.track_signal(
         event_id=interaction.id,
-        name="webjudge_result",
+        name=signal_name,
         signal_type="feedback",
         sentiment=sentiment,
         comment=f"Score: {score}. {reasoning[:200]}",

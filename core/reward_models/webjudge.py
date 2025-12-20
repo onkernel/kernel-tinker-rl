@@ -10,7 +10,7 @@ References:
     https://github.com/OSU-NLP-Group/Online-Mind2Web
     https://arxiv.org/abs/2504.01382 (Online-Mind2Web paper)
 
-Recommended model: o4-mini (85.7% human agreement per the paper).
+Recommended model: gpt-5-mini (previously o4-mini with 85.7% human agreement per the paper).
 """
 
 from __future__ import annotations
@@ -70,14 +70,14 @@ class WebJudge(RewardModel):
     3. Outcome Judgment - final success/failure determination
 
     Usage:
-        webjudge = WebJudge(model="openai/o4-mini")
+        webjudge = WebJudge(model="openai/gpt-5-mini")
         result = await webjudge.evaluate(trajectory)
         print(f"Success: {result.success}, Score: {result.score}")
     """
 
     def __init__(
         self,
-        model: str = "openai/o4-mini",
+        model: str = "openai/gpt-5-mini",
         api_key: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
     ):
@@ -85,7 +85,7 @@ class WebJudge(RewardModel):
         Initialize WebJudge.
 
         Args:
-            model: Model name (OpenRouter format, e.g., "openai/o4-mini")
+            model: Model name (OpenRouter format, e.g., "openai/gpt-5-mini")
             api_key: API key for OpenRouter. Falls back to OPENROUTER_API_KEY env var.
             base_url: API base URL. Defaults to OpenRouter.
         """

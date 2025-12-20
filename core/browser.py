@@ -19,12 +19,14 @@ import json
 import logging
 import random
 import ssl
+import threading
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Union, cast
 
 import websockets
 from PIL import Image
+from rich.console import Console
 
 from .actions import (
     Action,
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     BrowserInfo = Union[BrowserCreateResponse, BrowserPoolAcquireResponse]
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 # Type for custom action handlers: (adapter, action) -> should_continue
 ActionHandler = Callable[["KernelBrowserAdapter", Action], bool]
@@ -175,7 +178,7 @@ return { closedPages: pages.length - 1 };
             result_data = cast(dict[str, Any], result.result) if result.result else {}
             closed = result_data.get("closedPages", 0)
             if closed > 0:
-                logger.info(f"Browser reset: closed {closed} extra page(s)")
+                console.print(f"[dim]Browser reset: closed {closed} extra page(s)[/]")
 
     def register_handler(
         self,
@@ -368,10 +371,16 @@ return { closedPages: pages.length - 1 };
 
         elif isinstance(action, KeyAction):
             # Convert key list to Kernel format: ["ctrl", "c"] -> "Ctrl+c"
+            # Kernel uses x11 keysym names, so we need to normalize certain keys
+            def normalize_key(k: str) -> str:
+                if k.lower() == "enter":
+                    return "Return"
+                return k.capitalize()
+
             if len(action.keys) == 1:
-                key_str = action.keys[0].capitalize()
+                key_str = normalize_key(action.keys[0])
             else:
-                key_str = "+".join(k.capitalize() for k in action.keys)
+                key_str = "+".join(normalize_key(k) for k in action.keys)
             self.kernel.browsers.computer.press_key(id=self.session_id, keys=[key_str])
 
         elif isinstance(action, ScrollAction):
@@ -398,13 +407,16 @@ return { closedPages: pages.length - 1 };
 
         return not getattr(action, "is_terminal", False)
 
-    async def start_heartbeat(self) -> None:
+    def start_heartbeat_sync(self, task_label: str | None = None) -> None:
         """
-        Start heartbeat to keep browser alive during long VLM inference.
+        Start heartbeat in a dedicated background thread.
 
         The heartbeat sends periodic CDP commands to prevent the browser
-        from timing out. This is useful when VLM inference takes longer
-        than the browser's idle timeout.
+        from timing out. This runs in its own thread with its own event loop,
+        completely independent of the main asyncio loop.
+
+        Args:
+            task_label: Optional label for console logging (e.g., "temu.com")
 
         Requires cdp_ws_url to be available (from browser object or SDK).
         """
@@ -419,22 +431,14 @@ return { closedPages: pages.length - 1 };
             return  # Already running
 
         self._heartbeat = BrowserHeartbeat(
-            self.session_id, self.cdp_ws_url, self.heartbeat_interval
+            self.session_id, self.cdp_ws_url, self.heartbeat_interval, task_label
         )
-        await self._heartbeat.start()
-
-    async def stop_heartbeat(self) -> None:
-        """Stop the heartbeat task."""
-        if self._heartbeat:
-            await self._heartbeat.stop()
-            self._heartbeat = None
+        self._heartbeat.start_sync()
 
     def stop_heartbeat_sync(self) -> None:
-        """Stop the heartbeat task synchronously (for use in finally blocks)."""
+        """Stop the heartbeat thread synchronously (for use in finally blocks)."""
         if self._heartbeat:
-            self._heartbeat._stopped = True
-            if self._heartbeat._task:
-                self._heartbeat._task.cancel()
+            self._heartbeat.stop_sync()
             self._heartbeat = None
 
 
@@ -444,78 +448,153 @@ return { closedPages: pages.length - 1 };
 
 
 class BrowserHeartbeat:
-    """Keeps a browser session alive via periodic CDP WebSocket commands."""
+    """Keeps a browser session alive via periodic CDP WebSocket commands.
+    
+    Uses a dedicated background THREAD (not asyncio) to avoid event loop contention.
+    The thread has its own event loop for websocket I/O, completely independent
+    of the main application's asyncio loop.
+    """
 
-    def __init__(self, session_id: str, cdp_ws_url: str, interval: int = 10):
+    def __init__(
+        self,
+        session_id: str,
+        cdp_ws_url: str,
+        interval: int = 10,
+        task_label: str | None = None,
+    ):
         self.session_id = session_id
         self.cdp_ws_url = cdp_ws_url
         self.interval = interval
-        self._task: asyncio.Task | None = None
-        self._stopped = False
-        self._ws = None
+        self.task_label = task_label
+        self._thread: threading.Thread | None = None
+        self._stopped = threading.Event()
         self._cmd_id = 0
         self._ssl_ctx = ssl.create_default_context()
         self._ssl_ctx.check_hostname = False
         self._ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    async def start(self) -> None:
-        """Connect to CDP and start background heartbeat loop."""
-        if self._ws is not None:
+    def start_sync(self) -> None:
+        """Start heartbeat in a dedicated background thread.
+        
+        This is non-blocking - returns immediately after spawning the thread.
+        The thread handles connection with retries and runs independently.
+        """
+        if self._thread is not None and self._thread.is_alive():
             return
+        
+        self._stopped.clear()
+        self._thread = threading.Thread(
+            target=self._run_heartbeat_thread,
+            name=f"heartbeat-{self.session_id[:8]}",
+            daemon=True,  # Don't block process exit
+        )
+        self._thread.start()
 
+    def stop_sync(self) -> None:
+        """Stop the heartbeat thread."""
+        self._stopped.set()
+        if self._thread is not None:
+            # Give thread a moment to notice the stop flag
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def _run_heartbeat_thread(self) -> None:
+        """Main heartbeat thread function - runs its own asyncio event loop."""
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         try:
-            await asyncio.sleep(random.uniform(0, 2))
-            self._ws = await asyncio.wait_for(
-                websockets.connect(
-                    self.cdp_ws_url,
-                    ssl=self._ssl_ctx,
-                    ping_interval=None,
-                    ping_timeout=None,
-                ),
-                timeout=10,
-            )
-            await self._send_heartbeat()
-            self._stopped = False
-            self._task = asyncio.create_task(self._heartbeat_loop())
+            loop.run_until_complete(self._heartbeat_thread_main())
         except Exception as e:
-            logger.debug(f"Heartbeat connect failed for {self.session_id}: {e}")
+            logger.debug(f"Heartbeat thread error for {self.session_id}: {e}")
+        finally:
+            loop.close()
 
-    async def stop(self) -> None:
-        """Stop heartbeat and close connection."""
-        self._stopped = True
-        if self._task:
-            self._task.cancel()
+    async def _heartbeat_thread_main(self) -> None:
+        """Async main for heartbeat thread - connect with retries, then heartbeat loop."""
+        ws = None
+        
+        # Stagger start time (0-3s) to spread out connection attempts
+        stagger = random.uniform(0, 3)
+        await asyncio.sleep(stagger)
+        
+        # Try to connect with retries
+        max_retries = 5
+        for attempt in range(max_retries):
+            if self._stopped.is_set():
+                return
+                
             try:
-                await self._task
-            except asyncio.CancelledError:
+                ws = await asyncio.wait_for(
+                    websockets.connect(
+                        self.cdp_ws_url,
+                        ssl=self._ssl_ctx,
+                        ping_interval=None,
+                        ping_timeout=None,
+                    ),
+                    timeout=10,  # 10s timeout per attempt
+                )
+                
+                # Send initial heartbeat to verify connection
+                if await self._send_heartbeat(ws):
+                    break  # Success!
+                else:
+                    await ws.close()
+                    ws = None
+                    
+            except asyncio.TimeoutError:
                 pass
-            self._task = None
-        if self._ws:
-            try:
-                await self._ws.close()
             except Exception:
                 pass
-            self._ws = None
+            
+            # Exponential backoff: 1s, 2s, 4s, 8s
+            if attempt < max_retries - 1:
+                backoff = min(2 ** attempt, 8)
+                await asyncio.sleep(backoff)
+        
+        if ws is None:
+            return
+        
+        # Run heartbeat loop
+        try:
+            while not self._stopped.is_set():
+                await asyncio.sleep(self.interval)
+                if self._stopped.is_set():
+                    break
+                    
+                result = await self._send_heartbeat(ws)
+                
+                # Console log for heartbeat
+                if self.task_label:
+                    status = "heartbeat" if result else "[red]heartbeat failed[/]"
+                    console.print(
+                        f"    {self._format_ts()} [dim]{self.task_label}: {status} browser={self.session_id}[/]"
+                    )
+                
+                if not result:
+                    # Connection failed, try to reconnect
+                    break
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
-    async def _send_heartbeat(self) -> bool:
-        if not self._ws:
-            return False
+    async def _send_heartbeat(self, ws) -> bool:
+        """Send a single heartbeat command and wait for response."""
         try:
             self._cmd_id += 1
-            await self._ws.send(json.dumps({"id": self._cmd_id, "method": "Browser.getVersion"}))
-            await asyncio.wait_for(self._ws.recv(), timeout=5)
+            await ws.send(json.dumps({"id": self._cmd_id, "method": "Browser.getVersion"}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
             return True
         except Exception:
             return False
 
-    async def _heartbeat_loop(self) -> None:
-        while not self._stopped and self._ws:
-            try:
-                await asyncio.sleep(self.interval)
-                if not self._stopped:
-                    await self._send_heartbeat()
-            except (asyncio.CancelledError, Exception):
-                break
+    def _format_ts(self) -> str:
+        """Return short timestamp [HH:MM:SS] for heartbeat log lines."""
+        from datetime import datetime
+        return datetime.now().strftime("[%H:%M:%S]")
 
 
 # =============================================================================

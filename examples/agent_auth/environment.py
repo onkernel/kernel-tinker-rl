@@ -46,7 +46,7 @@ from core.reward_models.webjudge import Trajectory as WebJudgeTrajectory
 from core.reward_models.webjudge import WebJudge
 from core.utils import resize_image
 
-from .actions import AGENT_AUTH_ACTIONS, RequestInputsAction
+from .actions import AGENT_AUTH_ACTIONS, FoundInputsAction
 from .config import get_agent_auth_system_prompt
 from .dataset import AgentAuthTask, load_tasks
 
@@ -135,7 +135,7 @@ class AgentAuthEnv(Env):
             self.adapter = KernelBrowserAdapter(self.kernel, browser)
 
             # Start heartbeat to keep browser alive during long VLM inference
-            await self.adapter.start_heartbeat()
+            self.adapter.start_heartbeat_sync()
 
             # Navigate to domain
             url = self.task.initial_url
@@ -381,7 +381,7 @@ class AgentAuthEnv(Env):
         """Ensure browser is released (async version - properly stops heartbeat)."""
         if self.adapter is not None:
             try:
-                await self.adapter.stop_heartbeat()
+                self.adapter.stop_heartbeat_sync()
                 self.kernel.browser_pools.release(
                     self.config.pool_name,
                     session_id=self.adapter.session_id,
@@ -465,7 +465,7 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
                         metrics = {"webjudge_error": 1.0}
                 else:
                     # No WebJudge - use heuristic based on terminal action
-                    if isinstance(env.final_action, RequestInputsAction):
+                    if isinstance(env.final_action, FoundInputsAction):
                         # Found login form - positive reward
                         reward = 1.0
                         metrics = {"found_form": 1.0}
@@ -575,7 +575,7 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
     max_screenshots_in_context: int = 3
 
     # WebJudge config
-    webjudge_model: str = "openai/o4-mini"
+    webjudge_model: str = "openai/gpt-5-mini"
     webjudge_enabled: bool = True
 
     async def __call__(self) -> tuple[AgentAuthRLDataset, None]:

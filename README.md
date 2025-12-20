@@ -146,7 +146,7 @@ Training RL agents requires reward signals. WebJudge provides these by evaluatin
 ```python
 from core import WebJudge, Trajectory
 
-webjudge = WebJudge(model="openai/o4-mini")
+webjudge = WebJudge(model="openai/gpt-5-mini")
 
 trajectory = Trajectory(
     task_id="example",

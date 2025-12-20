@@ -1,72 +1,101 @@
 """
 Custom actions for Agent Auth (login discovery).
 
-Provides the RequestInputsAction for reporting discovered login form fields.
+Provides the FoundInputsAction for reporting discovered login form fields.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from core.actions import Action
 
 
+FieldType = Literal["text", "email", "password", "tel", "number", "url", "code"]
+
+
 @dataclass
-class InputField:
-    """A requested input field for login forms."""
+class FoundField:
+    """A discovered form field."""
 
     name: str
-    description: str = ""
+    type: FieldType
+    selector: str
+    placeholder: str = ""
+    required: bool = True
 
 
 @dataclass
-class RequestInputsAction(Action):
+class FoundInputsAction(Action):
     """
-    Request input fields from the user.
+    Report discovered input fields.
 
     Used by login discovery agents to indicate they found a login form
-    and are reporting what inputs are needed.
+    and are reporting what inputs were discovered.
     """
 
-    fields: list[InputField] = field(default_factory=list)
+    fields: list[FoundField] = field(default_factory=list)
 
-    action_type: ClassVar[str] = "request_inputs"
+    action_type: ClassVar[str] = "found_inputs"
     description: ClassVar[str] = (
-        "Request input fields from the user (for login discovery). "
-        "Use when you've found a form and want to report the required fields. "
+        "Report discovered input fields from a form (for login discovery). "
+        "Use when you've found a form and want to report the discovered fields. "
         "This action completes the task."
     )
     is_terminal: ClassVar[bool] = True
     parameters: ClassVar[dict[str, dict[str, Any]]] = {
         "fields": {
             "type": "array",
-            "description": "List of input fields to request.",
+            "description": "List of discovered form fields.",
             "items": {
                 "type": "object",
+                "description": "A discovered form field",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Name of the input field (e.g., 'Username', 'Password').",
+                        "description": "Field name",
+                        "example": "email",
                     },
-                    "description": {
+                    "type": {
                         "type": "string",
-                        "description": "Optional description of what this field is for.",
+                        "enum": ["text", "email", "password", "tel", "number", "url", "code"],
+                        "description": "Field type",
+                        "example": "email",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the field",
+                        "example": "input#email",
+                    },
+                    "placeholder": {
+                        "type": "string",
+                        "description": "Field placeholder",
+                        "example": "you@example.com",
+                    },
+                    "required": {
+                        "type": "boolean",
+                        "description": "Whether field is required",
+                        "default": True,
+                        "example": True,
                     },
                 },
-                "required": ["name"],
+                "required": ["name", "type", "selector"],
             },
             "required": True,
         }
     }
 
     @classmethod
-    def parse_args(cls, args: dict) -> "RequestInputsAction | None":
+    def parse_args(cls, args: dict) -> "FoundInputsAction | None":
         fields_data = args.get("fields", [])
         fields = [
-            InputField(
+            FoundField(
                 name=f.get("name", ""),
-                description=f.get("description", ""),
+                type=f.get("type", "text"),
+                selector=f.get("selector", ""),
+                placeholder=f.get("placeholder", ""),
+                required=f.get("required", True),
             )
             for f in fields_data
         ]
@@ -74,14 +103,23 @@ class RequestInputsAction(Action):
 
     def to_description(self) -> str:
         field_names = [f.name for f in self.fields]
-        return f"Request inputs: {', '.join(field_names)}"
+        return f"Found inputs: {', '.join(field_names)}"
 
     def to_tool_args(self) -> dict:
         return {
             "action": self.action_type,
-            "fields": [{"name": f.name, "description": f.description} for f in self.fields],
+            "fields": [
+                {
+                    "name": f.name,
+                    "type": f.type,
+                    "selector": f.selector,
+                    "placeholder": f.placeholder,
+                    "required": f.required,
+                }
+                for f in self.fields
+            ],
         }
 
 
 # List of custom actions for Agent Auth
-AGENT_AUTH_ACTIONS: list[type[Action]] = [RequestInputsAction]
+AGENT_AUTH_ACTIONS: list[type[Action]] = [FoundInputsAction]

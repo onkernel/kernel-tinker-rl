@@ -219,7 +219,7 @@ class FormFillingEnv(Env):
             acquire_timeout_seconds=self.config.acquire_timeout_seconds,
         )
         self.adapter = KernelBrowserAdapter(self.kernel, browser)
-        await self.adapter.start_heartbeat()
+        self.adapter.start_heartbeat_sync()
 
         # Navigate
         self.adapter.navigate(self.task.initial_url)
@@ -332,7 +332,7 @@ class FormFillingEnv(Env):
 
     async def cleanup_async(self):
         if self.adapter:
-            await self.adapter.stop_heartbeat()
+            self.adapter.stop_heartbeat_sync()
             self.kernel.browser_pools.release(
                 self.config.pool_name, session_id=self.adapter.session_id, reuse=True
             )
@@ -407,7 +407,7 @@ class MyEnv(Env):
 
 See `examples/agent_auth/` for a complete, production-ready example of:
 
-- Custom actions (`RequestInputsAction`)
+- Custom actions (`FoundInputsAction`)
 - Domain-specific prompts
 - WebJudge integration
 - Full Tinker RL dataset implementation

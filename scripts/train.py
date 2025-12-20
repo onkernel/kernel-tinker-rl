@@ -36,7 +36,7 @@ Usage:
 Environment Variables:
     KERNEL_API_KEY: Required for Kernel browser API
     TINKER_API_KEY: Required for Tinker RL training
-    OPENROUTER_API_KEY: Required for WebJudge (o4-mini)
+    OPENROUTER_API_KEY: Required for WebJudge (gpt-5-mini)
     WANDB_API_KEY: Required for --wandb-project
 """
 
@@ -102,7 +102,7 @@ class TrainConfig:
     max_screenshots_in_context: int = 3  # Limit screenshots in VLM context
 
     # WebJudge parameters
-    webjudge_model: str = "openai/o4-mini"
+    webjudge_model: str = "openai/gpt-5-mini"
     webjudge_enabled: bool = True
 
     # Logging parameters
@@ -182,8 +182,8 @@ def parse_args() -> TrainConfig:
     # WebJudge parameters
     parser.add_argument(
         "--webjudge-model",
-        default="openai/o4-mini",
-        help="WebJudge model (default: openai/o4-mini)",
+        default="openai/gpt-5-mini",
+        help="WebJudge model (default: openai/gpt-5-mini)",
     )
     parser.add_argument("--no-webjudge", action="store_true", help="Disable WebJudge")
 

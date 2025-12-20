@@ -78,7 +78,7 @@ from core import parse_action_from_response
 
 action = parse_action_from_response(
     response='{"action": "left_click", "x": 0.5, "y": 0.3}',
-    extra_actions=[RequestInputsAction],  # Custom actions
+    extra_actions=[FoundInputsAction],  # Custom actions
 )
 ```
 
@@ -123,7 +123,7 @@ WebJudge is an LLM-as-judge that evaluates trajectories:
 ```python
 from core import WebJudge, Trajectory
 
-webjudge = WebJudge(model="openai/o4-mini")
+webjudge = WebJudge(model="openai/gpt-5-mini")
 
 trajectory = Trajectory(
     task_id="task-001",

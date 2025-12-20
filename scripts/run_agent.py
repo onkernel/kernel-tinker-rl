@@ -113,7 +113,7 @@ class RunConfig:
 
     # Evaluation
     webjudge: bool = False
-    webjudge_model: str = "openai/o4-mini"
+    webjudge_model: str = "openai/gpt-5-mini"
 
     # Control
     dry_run: bool = False
@@ -154,7 +154,7 @@ def parse_args() -> RunConfig:
 
     # Evaluation
     parser.add_argument("--webjudge", action="store_true", help="Evaluate with WebJudge")
-    parser.add_argument("--webjudge-model", default="openai/o4-mini", help="WebJudge model")
+    parser.add_argument("--webjudge-model", default="openai/gpt-5-mini", help="WebJudge model")
 
     # Control
     parser.add_argument("--dry-run", action="store_true", help="Print config without running")
@@ -412,6 +412,8 @@ async def run_agent(
     # Raindrop interaction (will be set if raindrop is enabled)
     interaction = None
 
+    adapter: KernelBrowserAdapter | None = None
+
     try:
         # Initialize Kernel
         kernel = Kernel()
@@ -426,6 +428,9 @@ async def run_agent(
             browser = kernel.browsers.create(stealth=True, headless=cfg.headless)
             adapter = KernelBrowserAdapter(kernel, browser)
             console.print(f"[green]✓[/] Created browser: {browser.session_id}")
+
+        # Start heartbeat to keep browser alive during long VLM inference
+        adapter.start_heartbeat_sync()
 
         if adapter.live_view_url:
             console.print(f"    Live view: {adapter.live_view_url}")
@@ -499,8 +504,9 @@ async def run_agent(
             nav_step_offset=1,  # Navigation is step 1
         )
 
-        # Run the shared agent loop
-        loop_result = run_agent_loop(
+        # Run the shared agent loop in a thread pool so heartbeat can run
+        loop_result = await asyncio.to_thread(
+            run_agent_loop,
             agent=agent,
             adapter=adapter,
             task=task,
@@ -581,10 +587,11 @@ async def run_agent(
 
             # Track webjudge result as a signal on the interaction
             if is_raindrop_enabled() and interaction is not None:
+                signal_name = "webjudge_success" if result.success else "webjudge_failure"
                 sentiment = "POSITIVE" if result.success else "NEGATIVE"
                 raindrop.track_signal(
                     event_id=interaction.id,
-                    name="webjudge_result",
+                    name=signal_name,
                     signal_type="feedback",
                     sentiment=sentiment,
                     comment=f"Score: {result.score}. {result.key_points}",
@@ -610,6 +617,9 @@ async def run_agent(
         return 0
 
     finally:
+        # Stop heartbeat thread
+        if adapter is not None:
+            adapter.stop_heartbeat_sync()
         shutdown_raindrop()
 
 

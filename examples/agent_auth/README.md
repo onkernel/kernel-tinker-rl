@@ -9,7 +9,7 @@ The Agent Auth agent:
 1. Navigates to a website
 2. Finds the login or registration page
 3. Identifies the input fields required to begin the login process
-4. Reports the fields using a custom `request_inputs` action
+4. Reports the fields using a custom `found_inputs` action
 
 ## Custom Action
 
@@ -17,12 +17,12 @@ This example adds a custom terminal action:
 
 ```python
 @dataclass
-class RequestInputsAction(Action):
-    """Request input fields from the user."""
+class FoundInputsAction(Action):
+    """Report discovered input fields."""
 
-    fields: list[InputField]
+    fields: list[FoundField]
 
-    action_type: ClassVar[str] = "request_inputs"
+    action_type: ClassVar[str] = "found_inputs"
     is_terminal: ClassVar[bool] = True
 ```
 
