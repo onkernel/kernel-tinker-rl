@@ -191,12 +191,12 @@ class QwenAgent:
             }
         ]
 
-        # Build previous actions summary
-        history_start = max(0, self.state.step_count - self.config.history_n)
+        # Build previous actions summary (keep only most recent history_n actions)
+        num_actions = len(self.state.actions)
+        history_start = max(0, num_actions - self.config.history_n)
         previous_actions = []
-        for i in range(history_start):
-            if i < len(self.state.actions):
-                previous_actions.append(f"Step {i + 1}: {self.state.actions[i]}")
+        for i in range(history_start, num_actions):
+            previous_actions.append(f"Step {i + 1}: {self.state.actions[i]}")
         previous_actions_str = "\n".join(previous_actions) if previous_actions else "None"
 
         # Build instruction prompt
@@ -207,9 +207,7 @@ Instruction: {instruction}
 Previous actions:
 {previous_actions_str}"""
 
-        # Split into two user messages for better tracing visibility:
-        # 1. Screenshot image
-        # 2. Text instruction
+        # Single user message with both image and text
         messages.append(
             {
                 "role": "user",
@@ -220,13 +218,11 @@ Previous actions:
                             "url": f"data:image/jpeg;base64,{current_screenshot_b64}"
                         },
                     },
+                    {
+                        "type": "text",
+                        "text": instruction_prompt,
+                    },
                 ],
-            }
-        )
-        messages.append(
-            {
-                "role": "user",
-                "content": instruction_prompt,
             }
         )
 
