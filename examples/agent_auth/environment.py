@@ -16,11 +16,22 @@ import random
 from dataclasses import dataclass
 from typing import Sequence
 
+import time
+from datetime import datetime
+
 import chz
 import tinker
 from kernel import Kernel
 from PIL import Image
+from rich.console import Console
 from tinker_cookbook import renderers
+
+console = Console()
+
+
+def ts() -> str:
+    """Return short timestamp [HH:MM:SS] for log lines."""
+    return datetime.now().strftime("[%H:%M:%S]")
 from tinker_cookbook.completers import StopCondition
 from tinker_cookbook.image_processing_utils import get_image_processor
 from tinker_cookbook.renderers import ImagePart, TextPart
@@ -161,15 +172,17 @@ class AgentAuthEnv(Env):
             screenshot_resized = resize_image(screenshot, max_size=self.config.image_max_size)
             self.screenshots.append(screenshot_resized.copy())
             self.action_history.append(f"Navigate to {url}")
+            console.print(f"  {ts()} [dim]{self.task.domain}: step=0 action=navigate url={url}[/]")
 
         except Exception as e:
-            # Browser acquisition or screenshot failed - mark as corrupted
+            # Browser acquisition failed - set flag and return minimal observation
             self._browser_corrupted = True
-            logger.error(f"Browser initialization failed for {self.task.initial_url}: {e}")
+            logger.warning(f"Browser initialization failed for {self.task.initial_url}: {e}")
+            console.print(f"  {ts()} [red]{self.task.domain}: error=init_failed[/]")
             # Cleanup any partial state
             self.cleanup()
-            # Re-raise to signal that this group should be skipped
-            raise
+            # Return empty observation - step() will immediately terminate
+            return tinker.ModelInput.empty(), self.stop_condition
 
         # Build conversation
         self.conversation = [
@@ -199,9 +212,9 @@ class AgentAuthEnv(Env):
         """
         self.step_count += 1
 
-        # Check if browser is corrupted - if so, raise to skip the group
+        # Check if browser is corrupted - return terminal result gracefully
         if self._browser_corrupted:
-            raise RuntimeError(f"Browser corrupted for {self.task.initial_url}")
+            return self._make_terminal_result(reward=0.0, metrics={"browser_corrupted": 1.0})
 
         # Decode tokens to text
         response_text, parse_success = self.renderer.parse_response(action)
@@ -214,6 +227,7 @@ class AgentAuthEnv(Env):
         if browser_action is None:
             # Failed to parse - terminate with zero reward
             logtree.log_text(f"Failed to parse action from response: {response_content[:200]}")
+            console.print(f"  {ts()} [red]{self.task.domain}: step={self.step_count} error=parse_failed[/]")
             return self._make_terminal_result(reward=0.0, metrics={"parse_error": 1.0})
 
         # Record action
@@ -227,6 +241,7 @@ class AgentAuthEnv(Env):
             self.final_action = browser_action
             # Terminal - reward computed by EnvGroupBuilder via WebJudge
             logtree.log_text(f"Terminal action: {action_desc}")
+            console.print(f"  {ts()} [dim]{self.task.domain}: step={self.step_count} action={action_desc} [done][/]")
             return self._make_terminal_result(
                 reward=0.0,  # Will be computed by compute_group_rewards
                 metrics={"terminal": 1.0},
@@ -236,6 +251,7 @@ class AgentAuthEnv(Env):
         if self.adapter is None:
             return self._make_terminal_result(reward=0.0, metrics={"no_adapter": 1.0})
 
+        t_exec_start = time.perf_counter()
         try:
             # Capture baseline for settle detection
             baseline = self.adapter.capture_screenshot()
@@ -244,6 +260,8 @@ class AgentAuthEnv(Env):
 
             if not should_continue:
                 self.final_action = browser_action
+                t_exec = time.perf_counter() - t_exec_start
+                console.print(f"  {ts()} [dim]{self.task.domain}: step={self.step_count} exec={t_exec:.1f}s action={action_desc} [done][/]")
                 return self._make_terminal_result(reward=0.0, metrics={"terminal": 1.0})
 
             # Wait for screen to settle
@@ -256,15 +274,19 @@ class AgentAuthEnv(Env):
             self.screenshots.append(screenshot_resized.copy())
 
         except Exception as e:
-            # Browser operation failed - mark as corrupted and raise to skip group
+            # Browser operation failed - mark as corrupted and terminate gracefully
             self._browser_corrupted = True
-            logger.error(f"Browser operation failed for {self.task.initial_url}: {e}")
+            logger.warning(f"Browser operation failed for {self.task.initial_url}: {e}")
+            console.print(f"  {ts()} [red]{self.task.domain}: step={self.step_count} error=browser_failed[/]")
             self.cleanup()
-            raise
+            return self._make_terminal_result(reward=0.0, metrics={"browser_error": 1.0})
+
+        t_exec = time.perf_counter() - t_exec_start
 
         # Check max steps
         if self.step_count >= self.config.max_steps:
             logtree.log_text(f"Max steps ({self.config.max_steps}) reached")
+            console.print(f"  {ts()} [yellow]{self.task.domain}: step={self.step_count} exec={t_exec:.1f}s action={action_desc} [max_steps][/]")
             return self._make_terminal_result(reward=0.0, metrics={"max_steps": 1.0})
 
         # Build next observation
@@ -282,6 +304,7 @@ class AgentAuthEnv(Env):
         self._prune_old_screenshots()
 
         logtree.log_text(f"Step {self.step_count}: {action_desc}")
+        console.print(f"  {ts()} [dim]{self.task.domain}: step={self.step_count} exec={t_exec:.1f}s action={action_desc}[/]")
 
         return StepResult(
             reward=0.0,  # Intermediate rewards are 0
@@ -480,7 +503,9 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
                 # Evaluate with WebJudge
                 if self.webjudge is not None and len(wj_traj.screenshots) > 0:
                     try:
+                        t_wj_start = time.perf_counter()
                         wj_result = await self.webjudge.evaluate(wj_traj)
+                        t_wj = time.perf_counter() - t_wj_start
                         reward = wj_result.score
                         metrics: Metrics = {
                             "webjudge_success": float(wj_result.success),
@@ -490,6 +515,11 @@ class AgentAuthEnvGroupBuilder(EnvGroupBuilder):
                         logtree.log_text(
                             f"WebJudge: {'SUCCESS' if wj_result.success else 'FAILURE'} "
                             f"(score={wj_result.score})"
+                        )
+                        status = "[green]✓[/]" if wj_result.success else "[red]✗[/]"
+                        console.print(
+                            f"  {ts()} {status} {env.task.domain}: "
+                            f"steps={env.step_count} judge={t_wj:.1f}s reward={wj_result.score:.2f}"
                         )
 
                         # Track WebJudge signal to Raindrop
