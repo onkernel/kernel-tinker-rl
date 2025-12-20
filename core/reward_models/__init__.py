@@ -1,7 +1,7 @@
 """Reward models for RL training."""
 
 from .base import EvaluationResult, HeuristicRewardModel, RewardModel, Trajectory
-from .webjudge import WebJudge, WebJudgeResult
+from .webjudge import DEFAULT_EVALUATION_CRITERIA, WebJudge, WebJudgeResult
 
 __all__ = [
     "RewardModel",
@@ -10,6 +10,5 @@ __all__ = [
     "HeuristicRewardModel",
     "WebJudge",
     "WebJudgeResult",
+    "DEFAULT_EVALUATION_CRITERIA",
 ]
-
-

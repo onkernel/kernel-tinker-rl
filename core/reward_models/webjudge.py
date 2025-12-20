@@ -31,6 +31,22 @@ from .base import RewardModel, Trajectory
 SCORE_THRESHOLD = 3  # Screenshots scoring more than this value are "key screenshots"
 MAX_IMAGES = 50  # Maximum images to include in final judgment
 
+# Default evaluation criteria (from Online-Mind2Web, designed for e-commerce/filtering tasks)
+DEFAULT_EVALUATION_CRITERIA = """1: The filtered results must be displayed correctly. If filters were not properly applied (i.e., missing selection, missing confirmation, or no visible effect in results), the task is not considered successful.
+2: You must carefully check whether these snapshots and action history meet these key points. Ensure that specific filter conditions, such as "best," "highest," "cheapest," "latest," "most recent," "lowest," "closest," "highest-rated," "largest," and "newest" are correctly applied using the filter function(e.g., sort function).
+3: Certain key points or requirements should be applied by the filter. Otherwise, a search with all requirements as input will be deemed a failure since it cannot guarantee that all results meet the requirements!
+4: If the task requires filtering by a specific range of money, years, or the number of beds and bathrooms, the applied filter must exactly match the given requirement. Any deviation results in failure. To ensure the task is successful, the applied filter must precisely match the specified range without being too broad or too narrow.
+Examples of Failure Cases:
+- If the requirement is less than $50, but the applied filter is less than $25, it is a failure.
+- If the requirement is $1500-$2500, but the applied filter is $2000-$2500, it is a failure.
+- If the requirement is $25-$200, but the applied filter is $0-$200, it is a failure.
+- If the required years are 2004-2012, but the filter applied is 2001-2012, it is a failure.
+- If the required years are before 2015, but the applied filter is 2000-2014, it is a failure.
+- If the task requires exactly 2 beds, but the filter applied is 2+ beds, it is a failure.
+5: Some tasks require a submission action or a display of results to be considered successful.
+6: If the retrieved information is invalid or empty(e.g., No match was found), but the agent has correctly performed the required action, it should still be considered successful.
+7: If the current page already displays all available items, then applying a filter is not necessary. As long as the agent selects items that meet the requirements (e.g., the cheapest or lowest price), the task is still considered successful."""
+
 
 def encode_image(image: Image.Image) -> str:
     """Convert a PIL image to base64 JPEG string."""
@@ -80,6 +96,7 @@ class WebJudge(RewardModel):
         model: str = "openai/gpt-5-mini",
         api_key: str | None = None,
         base_url: str = "https://openrouter.ai/api/v1",
+        evaluation_criteria: str | None = None,
     ):
         """
         Initialize WebJudge.
@@ -88,12 +105,16 @@ class WebJudge(RewardModel):
             model: Model name (OpenRouter format, e.g., "openai/gpt-5-mini")
             api_key: API key for OpenRouter. Falls back to OPENROUTER_API_KEY env var.
             base_url: API base URL. Defaults to OpenRouter.
+            evaluation_criteria: Custom evaluation criteria for the judgment phase.
+                If None, uses DEFAULT_EVALUATION_CRITERIA (designed for e-commerce tasks).
+                Override this for different task types (e.g., authentication, navigation).
         """
         self.client = AsyncOpenAI(
             api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
             base_url=base_url,
         )
         self.model = model
+        self.evaluation_criteria = evaluation_criteria
 
     async def evaluate(self, trajectory: Trajectory) -> WebJudgeResult:
         """
@@ -303,24 +324,12 @@ The snapshot of the web page is shown in the image."""
         Returns:
             Tuple of (success: bool, reasoning: str)
         """
-        system_msg = """You are an expert in evaluating the performance of a web navigation agent. The agent is designed to help a human user navigate a website to complete a task. Given the user's task, the agent's action history, key points for task completion, some potentially important web pages in the agent's trajectory and their reasons, your goal is to determine whether the agent has completed the task and achieved all requirements.
+        criteria = self.evaluation_criteria or DEFAULT_EVALUATION_CRITERIA
+        system_msg = f"""You are an expert in evaluating the performance of a web navigation agent. The agent is designed to help a human user navigate a website to complete a task. Given the user's task, the agent's action history, key points for task completion, some potentially important web pages in the agent's trajectory and their reasons, your goal is to determine whether the agent has completed the task and achieved all requirements.
 
 Your response must strictly follow the following evaluation criteria!
 *Important Evaluation Criteria*:
-1: The filtered results must be displayed correctly. If filters were not properly applied (i.e., missing selection, missing confirmation, or no visible effect in results), the task is not considered successful.
-2: You must carefully check whether these snapshots and action history meet these key points. Ensure that specific filter conditions, such as "best," "highest," "cheapest," "latest," "most recent," "lowest," "closest," "highest-rated," "largest," and "newest" are correctly applied using the filter function(e.g., sort function).
-3: Certain key points or requirements should be applied by the filter. Otherwise, a search with all requirements as input will be deemed a failure since it cannot guarantee that all results meet the requirements!
-4: If the task requires filtering by a specific range of money, years, or the number of beds and bathrooms, the applied filter must exactly match the given requirement. Any deviation results in failure. To ensure the task is successful, the applied filter must precisely match the specified range without being too broad or too narrow.
-Examples of Failure Cases:
-- If the requirement is less than $50, but the applied filter is less than $25, it is a failure.
-- If the requirement is $1500-$2500, but the applied filter is $2000-$2500, it is a failure.
-- If the requirement is $25-$200, but the applied filter is $0-$200, it is a failure.
-- If the required years are 2004-2012, but the filter applied is 2001-2012, it is a failure.
-- If the required years are before 2015, but the applied filter is 2000-2014, it is a failure.
-- If the task requires exactly 2 beds, but the filter applied is 2+ beds, it is a failure.
-5: Some tasks require a submission action or a display of results to be considered successful.
-6: If the retrieved information is invalid or empty(e.g., No match was found), but the agent has correctly performed the required action, it should still be considered successful.
-7: If the current page already displays all available items, then applying a filter is not necessary. As long as the agent selects items that meet the requirements (e.g., the cheapest or lowest price), the task is still considered successful.
+{criteria}
 
 *IMPORTANT*
 Format your response into two lines as shown below:

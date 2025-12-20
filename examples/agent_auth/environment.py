@@ -52,6 +52,15 @@ from .dataset import AgentAuthTask, load_tasks
 
 logger = logging.getLogger(__name__)
 
+# Evaluation criteria for authentication/login discovery tasks
+AGENT_AUTH_EVALUATION_CRITERIA = """1. The agent must have navigated to an authentication page (login, sign-up, register, create account).
+2. The agent must have identified input fields that are actually visible on the final page.
+3. Many sites use progressive disclosure (showing email first, then password on the next step) - this is valid and should be considered successful.
+4. The reported fields should match what is visible in the screenshots.
+5. Do not penalize for "missing" fields that would only appear in later steps of a multi-step auth flow.
+6. If the task asks for "first" input fields, only the initially visible fields need to be reported.
+7. The agent should not fill in or submit any forms - just identify the fields."""
+
 # Default model for agent auth training
 MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 RENDERER_NAME = "qwen3_vl_disable_thinking"
@@ -577,6 +586,7 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
     # WebJudge config
     webjudge_model: str = "openai/gpt-5-mini"
     webjudge_enabled: bool = True
+    webjudge_criteria: str = AGENT_AUTH_EVALUATION_CRITERIA
 
     async def __call__(self) -> tuple[AgentAuthRLDataset, None]:
         """Build and return the dataset."""
@@ -600,7 +610,11 @@ class AgentAuthRLDatasetBuilder(RLDatasetBuilder):
         if self.webjudge_enabled:
             api_key = os.getenv("OPENROUTER_API_KEY")
             if api_key:
-                webjudge = WebJudge(model=self.webjudge_model, api_key=api_key)
+                webjudge = WebJudge(
+                    model=self.webjudge_model,
+                    api_key=api_key,
+                    evaluation_criteria=self.webjudge_criteria,
+                )
                 logger.info(f"WebJudge initialized with model: {self.webjudge_model}")
             else:
                 logger.warning("OPENROUTER_API_KEY not set, WebJudge disabled")
