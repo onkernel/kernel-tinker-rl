@@ -565,16 +565,16 @@ class BrowserHeartbeat:
                     
                 result = await self._send_heartbeat(ws)
                 
-                # Console log for heartbeat
-                if self.task_label:
-                    if result:
-                        console.print(
-                            f"    {self._format_ts()} [dim]{self.task_label}: heartbeat=ok browser={self.session_id}[/]"
-                        )
-                    else:
-                        console.print(
-                            f"    {self._format_ts()} [red]{self.task_label}: heartbeat=failed browser={self.session_id}[/]"
-                        )
+                # Console log for heartbeat (commented out - too noisy)
+                # if self.task_label:
+                #     if result:
+                #         console.print(
+                #             f"    {self._format_ts()} [dim]{self.task_label}: heartbeat=ok browser={self.session_id}[/]"
+                #         )
+                #     else:
+                #         console.print(
+                #             f"    {self._format_ts()} [red]{self.task_label}: heartbeat=failed browser={self.session_id}[/]"
+                #         )
                 
                 if not result:
                     # Connection failed, try to reconnect

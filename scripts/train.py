@@ -105,7 +105,7 @@ class TrainConfig:
     wandb_project: str | None = None
     wandb_name: str | None = None
     eval_every: int = 10  # 0 = disabled
-    save_every: int = 10  # 0 = disabled
+    save_every: int = 5  # 0 = disabled
 
     # Checkpoint parameters
     load_checkpoint_path: str | None = None
@@ -190,7 +190,7 @@ def parse_args() -> TrainConfig:
         "--eval-every", type=int, default=10, help="Eval frequency (default: 10, 0=disabled)"
     )
     parser.add_argument(
-        "--save-every", type=int, default=10, help="Save frequency (default: 10, 0=disabled)"
+        "--save-every", type=int, default=5, help="Save frequency (default: 5, 0=disabled)"
     )
 
     # Checkpoint parameters
