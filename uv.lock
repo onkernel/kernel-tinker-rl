@@ -1415,6 +1415,7 @@ dependencies = [
     { name = "raindrop-ai" },
     { name = "rich" },
     { name = "tinker-cookbook" },
+    { name = "wandb" },
     { name = "websockets" },
 ]
 
@@ -1423,9 +1424,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-]
-wandb = [
-    { name = "wandb" },
 ]
 
 [package.metadata]
@@ -1443,10 +1441,10 @@ requires-dist = [
     { name = "rich", specifier = ">=14.2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "tinker-cookbook", git = "https://github.com/thinking-machines-lab/tinker-cookbook.git" },
-    { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.16.0" },
+    { name = "wandb", specifier = ">=0.23.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
-provides-extras = ["dev", "wandb"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "kiwisolver"
