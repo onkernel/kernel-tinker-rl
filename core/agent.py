@@ -34,6 +34,15 @@ AVAILABLE_MODELS: list[str] = [
 
 DEFAULT_MODEL: str = AVAILABLE_MODELS[0]
 
+# Tinker OpenAI-compatible inference endpoint
+# See: https://tinker-docs.thinkingmachines.ai/compatible-apis/openai
+TINKER_OPENAI_BASE_URL: str = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+
+
+def is_tinker_checkpoint(model: str) -> bool:
+    """Check if the model path is a Tinker checkpoint (sampler_path)."""
+    return model.startswith("tinker://")
+
 
 def encode_image(image: Image.Image) -> str:
     """Convert a PIL image to base64 JPEG string."""
@@ -97,12 +106,23 @@ class QwenAgent:
         self._system_prompt = self.config.system_prompt or get_system_prompt()
         self._extra_actions = self.config.extra_actions or None
 
-        # Initialize OpenAI client for OpenRouter
+        # Initialize OpenAI client
+        # Use Tinker's OpenAI-compatible endpoint for checkpoint models,
+        # otherwise use OpenRouter (or custom base_url if provided)
         import os
 
+        if is_tinker_checkpoint(self.config.model):
+            # Tinker checkpoint: use Tinker's OpenAI-compatible API
+            base_url = TINKER_OPENAI_BASE_URL
+            api_key = self.config.api_key or os.getenv("TINKER_API_KEY")
+        else:
+            # Regular model: use OpenRouter or custom base_url
+            base_url = self.config.base_url
+            api_key = self.config.api_key or os.getenv("OPENROUTER_API_KEY")
+
         self.client = OpenAI(
-            api_key=self.config.api_key or os.getenv("OPENROUTER_API_KEY"),
-            base_url=self.config.base_url,
+            api_key=api_key,
+            base_url=base_url,
         )
 
         # Agent state

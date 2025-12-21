@@ -29,6 +29,9 @@ Create a `.env` file in the project root:
 KERNEL_API_KEY=your_kernel_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
 
+# Required for training and checkpoint evaluation
+TINKER_API_KEY=your_tinker_api_key
+
 # Optional (for experiment tracking)
 WANDB_API_KEY=your_wandb_api_key
 ```
@@ -81,8 +84,8 @@ Run the RL training loop:
 uv run python -m scripts.train \
   --env agent_auth \
   --pool-name rl-browser-pool \
-  --batch-size 4 \
-  --group-size 2 \
+  --batch-size 12 \
+  --group-size 4 \
   --wandb-project my-rl-experiment
 ```
 
@@ -90,8 +93,8 @@ Training parameters:
 
 | Parameter         | Description                  | Default |
 | ----------------- | ---------------------------- | ------- |
-| `--batch-size`    | Tasks per training batch     | 4       |
-| `--group-size`    | Rollouts per task (for GRPO) | 2       |
+| `--batch-size`    | Tasks per training batch     | 12      |
+| `--group-size`    | Rollouts per task (for GRPO) | 4       |
 | `--max-steps`     | Max actions per episode      | 5       |
 | `--max-tasks`     | Limit total tasks            | all     |
 | `--lora-rank`     | LoRA adapter rank            | 32      |
@@ -99,14 +102,69 @@ Training parameters:
 
 ## Step 5: Evaluate Your Model
 
-After training, evaluate on a held-out test set:
+After training, evaluate your checkpoints against baseline models.
+
+### Basic Evaluation
+
+Evaluate the baseline model on all tasks:
 
 ```bash
 uv run python -m scripts.evaluate \
   --env agent_auth \
   --pool-name rl-browser-pool \
-  --max-tasks 50 \
   --output results.json
+```
+
+### Evaluating on Held-Out Data
+
+Use `--start-index` and `--end-index` to evaluate on a subset of tasks (0-based, inclusive).
+This enables train/test splits for comparing checkpoints against baselines on unseen data:
+
+```bash
+# Evaluate checkpoint on held-out test set (last 20% of tasks, e.g., indices 80+)
+uv run python -m scripts.evaluate \
+  --env agent_auth \
+  --pool-name rl-browser-pool \
+  --model tinker://YOUR_RUN_ID:train:0/sampler_weights/000030 \
+  --start-index 80
+
+# Evaluate baseline on training set (first 80 tasks, indices 0-79)
+uv run python -m scripts.evaluate \
+  --env agent_auth \
+  --pool-name rl-browser-pool \
+  --end-index 79
+```
+
+### Evaluating Tinker Checkpoints
+
+Point to a Tinker checkpoint's `sampler_path` from your `checkpoints.jsonl`:
+
+```bash
+# Find your checkpoint paths
+cat /path/to/your/training/run/checkpoints.jsonl
+
+# Example output:
+# {"name": "000030", "batch": 30, "sampler_path": "tinker://488643ee-.../sampler_weights/000030", ...}
+
+# Evaluate checkpoint 30 on held-out set
+uv run python -m scripts.evaluate \
+  --env agent_auth \
+  --pool-name rl-browser-pool \
+  --model tinker://488643ee-3be8-523e-9297-aecf5f8bb48f:train:0/sampler_weights/000030 \
+  --start-index 80 \
+  --output checkpoint_30_heldout.json
+```
+
+### Quick Checkpoint Testing
+
+Test a single task with a checkpoint using `run_agent.py`:
+
+```bash
+uv run python -m scripts.run_agent \
+  --env agent_auth \
+  --checkpoint tinker://488643ee-.../sampler_weights/000030 \
+  --random \
+  --webjudge
 ```
 
 ## Next Steps

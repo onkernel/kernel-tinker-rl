@@ -183,6 +183,8 @@ class EvalConfig:
     max_tasks: int | None = None
     max_steps: int = 10
     task_file: str | None = None
+    start_index: int | None = None  # Start index for task subset (0-based, inclusive)
+    end_index: int | None = None  # End index for task subset (0-based, inclusive)
 
     # Browser pool parameters
     pool_name: str = "eval-browser-pool"
@@ -236,6 +238,18 @@ def parse_args() -> EvalConfig:
         "--max-steps", type=int, default=10, help="Max actions per episode (default: 10)"
     )
     parser.add_argument("--task-file", default=None, help="Path to task JSONL file")
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help="Start index for task subset (0-based, inclusive). Use with --end-index for held-out evaluation.",
+    )
+    parser.add_argument(
+        "--end-index",
+        type=int,
+        default=None,
+        help="End index for task subset (0-based, inclusive). Use with --start-index for held-out evaluation.",
+    )
 
     # Browser pool parameters
     parser.add_argument(
@@ -282,6 +296,8 @@ def parse_args() -> EvalConfig:
         max_tasks=args.max_tasks,
         max_steps=args.max_steps,
         task_file=args.task_file,
+        start_index=args.start_index,
+        end_index=args.end_index,
         pool_name=args.pool_name,
         pool_size=args.pool_size,
         acquire_timeout_seconds=args.acquire_timeout,
@@ -306,6 +322,11 @@ def print_config(cfg: EvalConfig) -> None:
     table.add_row("Max Tasks", str(cfg.max_tasks or "all"))
     table.add_row("Max Steps", str(cfg.max_steps))
     table.add_row("Task File", cfg.task_file or "(default for env)")
+    # Show task index range if specified
+    if cfg.start_index is not None or cfg.end_index is not None:
+        start_str = str(cfg.start_index) if cfg.start_index is not None else "0"
+        end_str = str(cfg.end_index) if cfg.end_index is not None else "end"
+        table.add_row("Task Index Range", f"{start_str} to {end_str} (inclusive)")
     table.add_row("Pool Name", cfg.pool_name)
     table.add_row("Pool Size", str(cfg.pool_size or "(query from pool)"))
     table.add_row("Output File", cfg.output_file or "(stdout only)")
@@ -323,11 +344,10 @@ def get_tasks_and_system_prompt(cfg: EvalConfig):
         from examples.osworld.dataset import load_tasks
 
         task_file = cfg.task_file or "examples/osworld/tasks.jsonl"
-        tasks = load_tasks(task_file, limit=cfg.max_tasks)
+        # Load all tasks first, then apply index filtering
+        tasks = load_tasks(task_file, limit=None)
         system_prompt = get_osworld_system_prompt()
         extra_actions = OSWORLD_ACTIONS
-
-        return tasks, system_prompt, extra_actions
 
     elif cfg.env == "agent_auth":
         from examples.agent_auth.actions import AGENT_AUTH_ACTIONS
@@ -335,14 +355,26 @@ def get_tasks_and_system_prompt(cfg: EvalConfig):
         from examples.agent_auth.dataset import load_tasks
 
         task_file = cfg.task_file or "examples/agent_auth/tasks.jsonl"
-        tasks = load_tasks(task_file, limit=cfg.max_tasks)
+        # Load all tasks first, then apply index filtering
+        tasks = load_tasks(task_file, limit=None)
         system_prompt = get_agent_auth_system_prompt()
         extra_actions = AGENT_AUTH_ACTIONS
 
-        return tasks, system_prompt, extra_actions
-
     else:
         raise ValueError(f"Unknown environment: {cfg.env}")
+
+    # Apply index filtering if specified (0-based, inclusive)
+    if cfg.start_index is not None or cfg.end_index is not None:
+        start = cfg.start_index if cfg.start_index is not None else 0
+        # end_index is inclusive, so add 1 for Python slicing
+        end = (cfg.end_index + 1) if cfg.end_index is not None else len(tasks)
+        tasks = tasks[start:end]
+
+    # Apply max_tasks limit after index filtering
+    if cfg.max_tasks is not None:
+        tasks = tasks[: cfg.max_tasks]
+
+    return tasks, system_prompt, extra_actions
 
 
 def _run_episode_sync(

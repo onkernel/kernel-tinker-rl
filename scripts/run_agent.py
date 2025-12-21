@@ -146,6 +146,11 @@ def parse_args() -> RunConfig:
 
     # Agent config
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Model to use (default: {DEFAULT_MODEL})")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Tinker checkpoint path (e.g., tinker://...sampler_weights/000010). Overrides --model.",
+    )
     parser.add_argument("--max-steps", type=int, default=10, help="Max steps (default: 10)")
 
     # Browser config
@@ -161,6 +166,9 @@ def parse_args() -> RunConfig:
 
     args = parser.parse_args()
 
+    # Use checkpoint path as model if provided
+    model = args.checkpoint if args.checkpoint else args.model
+
     return RunConfig(
         env=args.env,
         url=args.url,
@@ -168,7 +176,7 @@ def parse_args() -> RunConfig:
         task_id=args.task_id,
         random_task=args.random_task,
         task_file=args.task_file,
-        model=args.model,
+        model=model,
         max_steps=args.max_steps,
         pool_name=args.pool_name,
         headless=args.headless,
