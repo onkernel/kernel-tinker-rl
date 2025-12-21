@@ -57,7 +57,7 @@ from kernel import Kernel
 from rich.console import Console
 from rich.table import Table
 
-from core.agent import AgentConfig, QwenAgent
+from core.agent import AgentConfig, QwenAgent, is_tinker_checkpoint
 from core.agent_loop import run_agent_loop
 from core.browser import KernelBrowserAdapter
 from core.reward_models import Trajectory, WebJudge
@@ -682,13 +682,21 @@ async def eval_main(cfg: EvalConfig) -> int:
     webjudge = WebJudge(model=cfg.webjudge_model, api_key=openrouter_key)
     console.print(f"  ✓ WebJudge ({cfg.webjudge_model})")
 
+    # Use appropriate API key based on model type
+    # Tinker checkpoints use TINKER_API_KEY, regular models use OPENROUTER_API_KEY
+    # Pass None to let the agent auto-detect from environment
+    agent_api_key = None if is_tinker_checkpoint(cfg.agent_model) else openrouter_key
+
     agent_config = AgentConfig(
         model=cfg.agent_model,
-        api_key=openrouter_key,
+        api_key=agent_api_key,
         system_prompt=system_prompt,
         extra_actions=extra_actions,
     )
-    console.print(f"  ✓ Agent config ({cfg.agent_model})")
+    if is_tinker_checkpoint(cfg.agent_model):
+        console.print(f"  ✓ Agent config ({cfg.agent_model[:50]}...) [Tinker checkpoint]")
+    else:
+        console.print(f"  ✓ Agent config ({cfg.agent_model})")
 
     # Run evaluation
     console.print(f"\n[bold blue]Running evaluation ({pool_size} concurrent)...[/]")

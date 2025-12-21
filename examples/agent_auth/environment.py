@@ -175,14 +175,16 @@ class AgentAuthEnv(Env):
             console.print(f"  {ts()} [dim]{self.task.domain}: step=0 action=navigate url={url}[/]")
 
         except Exception as e:
-            # Browser acquisition failed - set flag and return minimal observation
+            # Browser acquisition failed - set flag and cleanup
             self._browser_corrupted = True
             logger.warning(f"Browser initialization failed for {self.task.initial_url}: {e}")
             console.print(f"  {ts()} [red]{self.task.domain}: error=init_failed[/]")
             # Cleanup any partial state
             self.cleanup()
-            # Return empty observation - step() will immediately terminate
-            return tinker.ModelInput.empty(), self.stop_condition
+            # Raise exception to signal Tinker to skip this environment
+            # Returning ModelInput.empty() causes "Empty prompt provided" error
+            # because Tinker tries to sample before calling step()
+            raise RuntimeError(f"Browser initialization failed for {self.task.domain}: {e}") from e
 
         # Build conversation
         self.conversation = [

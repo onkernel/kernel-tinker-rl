@@ -65,6 +65,25 @@ Tasks are stored in JSONL format with three required fields:
 
 For the Agent Auth example, a preprocessed task file is included at `examples/agent_auth/tasks.jsonl`.
 
+### Creating Train/Test Splits
+
+To enable proper evaluation against held-out data, split your dataset into train and eval sets:
+
+```bash
+# Split into 80% train / 20% eval with shuffling (seed=42 for reproducibility)
+uv run python scripts/split_dataset.py examples/agent_auth/tasks.jsonl
+
+# Creates:
+#   examples/agent_auth/tasks_train.jsonl (375 tasks)
+#   examples/agent_auth/tasks_eval.jsonl (94 tasks)
+```
+
+You can customize the split ratio and seed:
+
+```bash
+uv run python scripts/split_dataset.py examples/agent_auth/tasks.jsonl --train-ratio 0.9 --seed 123
+```
+
 ## Step 3: Run a Quick Test
 
 Before training, test that everything works with a single agent run:
@@ -78,7 +97,9 @@ uv run python -m scripts.run_agent \
 
 ## Step 4: Start Training
 
-Run the RL training loop:
+Run the RL training loop. Results are saved to `./results/<run_name>/` by default.
+
+### Training on the Full Dataset
 
 ```bash
 uv run python -m scripts.train \
@@ -89,80 +110,125 @@ uv run python -m scripts.train \
   --wandb-project my-rl-experiment
 ```
 
+### Training on the Train Split Only
+
+For proper train/eval separation, train only on the training split:
+
+```bash
+uv run python -m scripts.train \
+  --env agent_auth \
+  --pool-name rl-browser-pool \
+  --task-file examples/agent_auth/tasks_train.jsonl \
+  --wandb-project my-rl-experiment
+```
+
+### Continuing from a Checkpoint
+
+Resume training from a previous checkpoint using the `state_path` from your `checkpoints.jsonl`:
+
+```bash
+uv run python -m scripts.train \
+  --env agent_auth \
+  --pool-name rl-browser-pool \
+  --task-file examples/agent_auth/tasks_train.jsonl \
+  --load-checkpoint "tinker://YOUR_RUN_ID:train:0/weights/final" \
+  --wandb-project my-rl-experiment
+```
+
 Training parameters:
 
-| Parameter         | Description                  | Default |
-| ----------------- | ---------------------------- | ------- |
-| `--batch-size`    | Tasks per training batch     | 12      |
-| `--group-size`    | Rollouts per task (for GRPO) | 4       |
-| `--max-steps`     | Max actions per episode      | 5       |
-| `--max-tasks`     | Limit total tasks            | all     |
-| `--lora-rank`     | LoRA adapter rank            | 32      |
-| `--learning-rate` | Learning rate                | 4e-5    |
+| Parameter          | Description                          | Default    |
+| ------------------ | ------------------------------------ | ---------- |
+| `--batch-size`     | Tasks per training batch             | 12         |
+| `--group-size`     | Rollouts per task (for GRPO)         | 4          |
+| `--max-steps`      | Max actions per episode              | 5          |
+| `--max-tasks`      | Limit total tasks                    | all        |
+| `--task-file`      | Path to task JSONL file              | (env default) |
+| `--lora-rank`      | LoRA adapter rank                    | 32         |
+| `--learning-rate`  | Learning rate                        | 4e-5       |
+| `--load-checkpoint`| Tinker checkpoint path to resume from| None       |
+
+Training outputs are saved to `./results/<run_name>/`:
+- `config.json`: Training configuration
+- `checkpoints.jsonl`: Checkpoint paths for each save
+- `*.html`: Per-task rollout visualizations
 
 ## Step 5: Evaluate Your Model
 
-After training, evaluate your checkpoints against baseline models.
+After training, evaluate your checkpoints against baseline models on the held-out eval set.
 
-### Basic Evaluation
+### Evaluate Baseline Model
 
-Evaluate the baseline model on all tasks:
+First, establish a baseline by evaluating the pre-trained model on your eval set:
 
 ```bash
 uv run python -m scripts.evaluate \
   --env agent_auth \
-  --pool-name rl-browser-pool \
-  --output results.json
+  --pool-name eval-browser-pool \
+  --pool-size 25 \
+  --task-file examples/agent_auth/tasks_eval.jsonl \
+  --model qwen/qwen3-vl-30b-a3b-instruct \
+  --output results/baseline_eval.json
 ```
 
-### Evaluating on Held-Out Data
+### Evaluate Fine-tuned Checkpoint
 
-Use `--start-index` and `--end-index` to evaluate on a subset of tasks (0-based, inclusive).
-This enables train/test splits for comparing checkpoints against baselines on unseen data:
+> **Note:** Tinker's OpenAI-compatible API currently only supports text-based inference and does not support VLM (vision) messages with images. To evaluate fine-tuned VLM checkpoints, you will need to use an alternative inference provider that can load LoRA weights and serve vision models (e.g., vLLM, TGI, or a custom deployment).
+
+Once you have an inference endpoint for your fine-tuned model, evaluate it on the same eval set:
 
 ```bash
-# Evaluate checkpoint on held-out test set (last 20% of tasks, e.g., indices 80+)
+# Example with a custom inference endpoint
 uv run python -m scripts.evaluate \
   --env agent_auth \
-  --pool-name rl-browser-pool \
-  --model tinker://YOUR_RUN_ID:train:0/sampler_weights/000030 \
-  --start-index 80
-
-# Evaluate baseline on training set (first 80 tasks, indices 0-79)
-uv run python -m scripts.evaluate \
-  --env agent_auth \
-  --pool-name rl-browser-pool \
-  --end-index 79
+  --pool-name eval-browser-pool \
+  --pool-size 25 \
+  --task-file examples/agent_auth/tasks_eval.jsonl \
+  --model your-finetuned-model-endpoint \
+  --output results/checkpoint_eval.json
 ```
 
-### Evaluating Tinker Checkpoints
+You can find your checkpoint paths in `results/YOUR_RUN_NAME/checkpoints.jsonl` to download the LoRA weights for deployment.
 
-Point to a Tinker checkpoint's `sampler_path` from your `checkpoints.jsonl`:
+### Evaluation Parameters
+
+| Parameter       | Description                           | Default       |
+| --------------- | ------------------------------------- | ------------- |
+| `--task-file`   | Path to eval task JSONL file          | (env default) |
+| `--start-index` | Start index for task subset (0-based) | None (start)  |
+| `--end-index`   | End index for task subset (inclusive) | None (end)    |
+| `--pool-size`   | Number of concurrent evaluations      | (pool config) |
+| `--model`       | Model to evaluate (OpenRouter or tinker://) | (default) |
+
+### Using Index Ranges (Alternative)
+
+If you prefer not to create separate task files, use index ranges:
 
 ```bash
-# Find your checkpoint paths
-cat /path/to/your/training/run/checkpoints.jsonl
-
-# Example output:
-# {"name": "000030", "batch": 30, "sampler_path": "tinker://488643ee-.../sampler_weights/000030", ...}
-
-# Evaluate checkpoint 30 on held-out set
+# Evaluate on last 20% (indices 376-469 of 470 tasks)
 uv run python -m scripts.evaluate \
   --env agent_auth \
-  --pool-name rl-browser-pool \
-  --model tinker://488643ee-3be8-523e-9297-aecf5f8bb48f:train:0/sampler_weights/000030 \
-  --start-index 80 \
-  --output checkpoint_30_heldout.json
+  --pool-name eval-browser-pool \
+  --start-index 376 \
+  --end-index 469 \
+  --output results/heldout_eval.json
 ```
 
 ### Quick Checkpoint Testing
 
-Test a single task with a checkpoint using `run_agent.py`:
+Test a single task using `run_agent.py`:
 
 ```bash
+# Test with the baseline model
 uv run python -m scripts.run_agent \
   --env agent_auth \
-  --checkpoint tinker://488643ee-.../sampler_weights/000030 \
+  --random \
+  --webjudge
+
+# Test with a custom fine-tuned model endpoint (once deployed)
+uv run python -m scripts.run_agent \
+  --env agent_auth \
+  --model your-finetuned-model-endpoint \
   --random \
   --webjudge
 ```

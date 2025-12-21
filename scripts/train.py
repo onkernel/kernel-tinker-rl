@@ -25,6 +25,12 @@ Usage:
     # Dry run (print config without running)
     uv run python -m scripts.train --dry-run
 
+Output:
+    Training results are saved to ./results/<run_name>/ by default, including:
+    - config.json: Training configuration
+    - checkpoints.jsonl: Checkpoint paths for each save
+    - HTML files: Per-task rollout visualizations
+
 Environment Variables:
     KERNEL_API_KEY: Required for Kernel browser API
     TINKER_API_KEY: Required for Tinker RL training
@@ -349,11 +355,11 @@ async def train_main(cfg: TrainConfig) -> int:
         f"lr{cfg.learning_rate}_rank{cfg.lora_rank}_{date_and_time}"
     )
 
-    # Set log path
+    # Set log path (defaults to ./results/ directory)
     if cfg.log_path is not None:
         log_path = cfg.log_path
     else:
-        log_path = f"/tmp/kernel-tinker-rl/{run_name}"
+        log_path = f"results/{run_name}"
 
     # Set wandb name
     wandb_name = cfg.wandb_name or run_name
