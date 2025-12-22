@@ -40,11 +40,17 @@ data/*.jsonl
 data/*.json
 data/screenshots/
 # Note: examples/agent_auth/tasks.jsonl IS tracked (pre-processed task data)
-# Note: examples/agent_auth/tasks_train.jsonl and tasks_eval.jsonl are generated but useful to track
+# Generated train/eval splits (regenerate with split_dataset.py)
+examples/*/tasks_train.jsonl
+examples/*/tasks_eval.jsonl
 
-# Training results (large files - keep .gitkeep for directory structure)
-results/*/
-!results/.gitkeep
+# Training outputs
+checkpoints/
+results/
+queries/
+
+# Generated plots
+*.png
 
 # Logs
 *.log
