@@ -5,9 +5,9 @@ Modal vLLM server for serving fine-tuned Qwen3-VL models.
 Supports both base models and merged LoRA models.
 
 Usage:
-    # Step 1: Upload LoRA adapter to Modal volume
+    # Step 1: Upload LoRA adapter to Modal volume (local_path is required)
     uv run modal run scripts/modal_vllm_serve.py::upload_lora_adapter \
-        --local-path ./checkpoints/final
+        --local-path ./checkpoints/final-20251222/final
 
     # Step 2: Merge LoRA into base model (runs on Modal GPU)
     uv run modal run scripts/modal_vllm_serve.py::merge_lora_weights
@@ -107,8 +107,13 @@ def prefetch_model():
 
 
 @app.local_entrypoint()
-def upload_lora_adapter(local_path: str = "./checkpoints/final", adapter_name: str = "finetuned"):
-    """Upload a LoRA adapter from local machine to the Modal volume."""
+def upload_lora_adapter(local_path: str, adapter_name: str = "finetuned"):
+    """Upload a LoRA adapter from local machine to the Modal volume.
+    
+    Args:
+        local_path: Path to the LoRA adapter directory (required, no default)
+        adapter_name: Name to use for the adapter in Modal volume
+    """
     from pathlib import Path
 
     local_lora = Path(local_path)
