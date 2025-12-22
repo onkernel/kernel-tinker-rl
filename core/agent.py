@@ -21,7 +21,7 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from PIL import Image
 
-from .actions import Action, parse_action_from_response
+from .actions import Action, parse_action_from_args, parse_action_from_response
 from .prompts import get_system_prompt
 from .utils import resize_image
 
@@ -121,7 +121,7 @@ class QwenAgent:
             api_key = self.config.api_key or os.getenv("OPENROUTER_API_KEY")
 
         self.client = OpenAI(
-            api_key=api_key,
+            api_key=api_key or "dummy",  # Some endpoints don't require auth
             base_url=base_url,
         )
 
@@ -180,11 +180,27 @@ class QwenAgent:
             temperature=self.config.temperature,
         )
 
-        response_text = response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        response_text = msg.content or ""
         self.state.responses.append(response_text)
 
         # Parse response to Action
+        # First try parsing from text content (traditional <tool_call> format)
         action = parse_action_from_response(response_text, self._extra_actions)
+
+        # If no action found in text, check for native OpenAI-style tool_calls
+        # (OpenRouter converts <tool_call> tags to native format for some models)
+        if action is None and msg.tool_calls:
+            import json
+            for tc in msg.tool_calls:
+                if tc.function.name == "computer_use":
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        action = parse_action_from_args(args, self._extra_actions)
+                        if action:
+                            break
+                    except json.JSONDecodeError:
+                        pass
 
         if action:
             self.state.actions.append(action.to_description())

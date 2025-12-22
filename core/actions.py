@@ -612,7 +612,11 @@ def parse_tool_call(response: str) -> dict | None:
 
     Returns the parsed JSON dict or None if not found.
     """
+    # Try with closing tag first, then without (30B model sometimes omits closing tag)
     match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", response, re.DOTALL)
+    if not match:
+        # Fallback: match <tool_call> followed by JSON object without closing tag
+        match = re.search(r"<tool_call>\s*(\{.*\})\s*$", response, re.DOTALL)
     if not match:
         return None
 
