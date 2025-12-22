@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 from dataclasses import dataclass, field
 
 from typing import cast
 
 from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionMessageParam, ChatCompletionMessageToolCall
 from PIL import Image
 
 from .actions import Action, parse_action_from_args, parse_action_from_response
@@ -191,8 +192,10 @@ class QwenAgent:
         # If no action found in text, check for native OpenAI-style tool_calls
         # (OpenRouter converts <tool_call> tags to native format for some models)
         if action is None and msg.tool_calls:
-            import json
             for tc in msg.tool_calls:
+                # Only handle function tool calls (not custom tool calls)
+                if not isinstance(tc, ChatCompletionMessageToolCall):
+                    continue
                 if tc.function.name == "computer_use":
                     try:
                         args = json.loads(tc.function.arguments)
