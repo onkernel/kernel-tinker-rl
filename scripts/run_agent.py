@@ -106,6 +106,7 @@ class RunConfig:
     # Agent config
     model: str = DEFAULT_MODEL
     max_steps: int = 10
+    base_url: str | None = None  # Custom API base URL (e.g., Modal endpoint)
 
     # Browser config
     pool_name: str | None = None  # Use pool if set, else create browser
@@ -151,6 +152,11 @@ def parse_args() -> RunConfig:
         default=None,
         help="Tinker checkpoint path (e.g., tinker://...sampler_weights/000010). Overrides --model.",
     )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Custom API base URL (e.g., Modal endpoint). Overrides default OpenRouter/Tinker URLs.",
+    )
     parser.add_argument("--max-steps", type=int, default=10, help="Max steps (default: 10)")
 
     # Browser config
@@ -178,6 +184,7 @@ def parse_args() -> RunConfig:
         task_file=args.task_file,
         model=model,
         max_steps=args.max_steps,
+        base_url=args.base_url,
         pool_name=args.pool_name,
         headless=args.headless,
         webjudge=args.webjudge,
@@ -267,6 +274,8 @@ def print_config(cfg: RunConfig, url: str, task: str, task_id: str | None = None
     table.add_row("URL", url)
     table.add_row("Task", task[:60] + "..." if len(task) > 60 else task)
     table.add_row("Model", cfg.model)
+    if cfg.base_url:
+        table.add_row("Base URL", cfg.base_url)
     table.add_row("Max Steps", str(cfg.max_steps))
     table.add_row("Browser Pool", cfg.pool_name or "create new")
     table.add_row("WebJudge", "enabled" if cfg.webjudge else "disabled")
@@ -449,8 +458,14 @@ async def run_agent(
             system_prompt=system_prompt,
             extra_actions=extra_actions,
         )
+        # Override base_url if provided (for Modal/custom endpoints)
+        if cfg.base_url:
+            agent_config.base_url = cfg.base_url
         agent = QwenAgent(config=agent_config)
-        console.print(f"[green]✓[/] Agent initialized with {cfg.model} (env={cfg.env})")
+        model_info = cfg.model
+        if cfg.base_url:
+            model_info += f" @ {cfg.base_url}"
+        console.print(f"[green]✓[/] Agent initialized with {model_info} (env={cfg.env})")
 
         # Start Raindrop interaction
         if is_raindrop_enabled():

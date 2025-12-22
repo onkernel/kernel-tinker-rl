@@ -178,6 +178,7 @@ class EvalConfig:
     # Model parameters
     agent_model: str = DEFAULT_AGENT_MODEL
     webjudge_model: str = DEFAULT_WEBJUDGE_MODEL
+    base_url: str | None = None  # Custom API base URL (e.g., Modal endpoint)
 
     # Evaluation parameters
     max_tasks: int | None = None
@@ -223,6 +224,11 @@ def parse_args() -> EvalConfig:
         "--model",
         default=DEFAULT_AGENT_MODEL,
         help=f"Agent model to use (default: {DEFAULT_AGENT_MODEL})",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Custom API base URL (e.g., Modal endpoint). Overrides default OpenRouter/Tinker URLs.",
     )
     parser.add_argument(
         "--webjudge-model",
@@ -293,6 +299,7 @@ def parse_args() -> EvalConfig:
         env=args.env,
         agent_model=args.model,
         webjudge_model=args.webjudge_model,
+        base_url=args.base_url,
         max_tasks=args.max_tasks,
         max_steps=args.max_steps,
         task_file=args.task_file,
@@ -318,6 +325,8 @@ def print_config(cfg: EvalConfig) -> None:
 
     table.add_row("Environment", cfg.env)
     table.add_row("Agent Model", cfg.agent_model)
+    if cfg.base_url:
+        table.add_row("Base URL", cfg.base_url)
     table.add_row("WebJudge Model", cfg.webjudge_model)
     table.add_row("Max Tasks", str(cfg.max_tasks or "all"))
     table.add_row("Max Steps", str(cfg.max_steps))
@@ -684,6 +693,7 @@ async def eval_main(cfg: EvalConfig) -> int:
 
     # Use appropriate API key based on model type
     # Tinker checkpoints use TINKER_API_KEY, regular models use OPENROUTER_API_KEY
+    # Custom base_url uses OPENROUTER_API_KEY as a generic token
     # Pass None to let the agent auto-detect from environment
     agent_api_key = None if is_tinker_checkpoint(cfg.agent_model) else openrouter_key
 
@@ -693,7 +703,13 @@ async def eval_main(cfg: EvalConfig) -> int:
         system_prompt=system_prompt,
         extra_actions=extra_actions,
     )
-    if is_tinker_checkpoint(cfg.agent_model):
+    # Override base_url if provided (for Modal/custom endpoints)
+    if cfg.base_url:
+        agent_config.base_url = cfg.base_url
+
+    if cfg.base_url:
+        console.print(f"  ✓ Agent config ({cfg.agent_model}) @ {cfg.base_url}")
+    elif is_tinker_checkpoint(cfg.agent_model):
         console.print(f"  ✓ Agent config ({cfg.agent_model[:50]}...) [Tinker checkpoint]")
     else:
         console.print(f"  ✓ Agent config ({cfg.agent_model})")
