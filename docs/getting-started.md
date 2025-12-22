@@ -173,18 +173,18 @@ uv run python -m scripts.evaluate \
 
 ### Evaluate Fine-tuned Checkpoint
 
-> **Note:** Tinker's OpenAI-compatible API currently only supports text-based inference and does not support VLM (vision) messages with images. To evaluate fine-tuned VLM checkpoints, you will need to use an alternative inference provider that can load LoRA weights and serve vision models (e.g., vLLM, TGI, or a custom deployment).
+> **Note:** Tinker's OpenAI-compatible API currently only supports text-based inference and does not support VLM (vision) messages with images. To evaluate fine-tuned VLM checkpoints, you will need to deploy your model to an inference provider that supports LoRA weights and vision models.
 
-Once you have an inference endpoint for your fine-tuned model, evaluate it on the same eval set:
+Once you have an inference endpoint for your fine-tuned model (see [Deploying Fine-Tuned Models](#deploying-fine-tuned-models) below), evaluate it using the `--base-url` flag:
 
 ```bash
-# Example with a custom inference endpoint
+# Example with a Modal-deployed model
 uv run python -m scripts.evaluate \
   --env agent_auth \
   --pool-name eval-browser-pool \
   --pool-size 25 \
   --task-file examples/agent_auth/tasks_eval.jsonl \
-  --model your-finetuned-model-endpoint \
+  --base-url https://your-modal-app--serve.modal.run/v1 \
   --output results/checkpoint_eval.json
 ```
 
@@ -199,6 +199,7 @@ You can find your checkpoint paths in `results/YOUR_RUN_NAME/checkpoints.jsonl` 
 | `--end-index`   | End index for task subset (inclusive) | None (end)    |
 | `--pool-size`   | Number of concurrent evaluations      | (pool config) |
 | `--model`       | Model to evaluate (OpenRouter or tinker://) | (default) |
+| `--base-url`    | Custom API base URL (e.g., Modal endpoint) | None      |
 
 ### Using Index Ranges (Alternative)
 
@@ -228,9 +229,55 @@ uv run python -m scripts.run_agent \
 # Test with a custom fine-tuned model endpoint (once deployed)
 uv run python -m scripts.run_agent \
   --env agent_auth \
-  --model your-finetuned-model-endpoint \
+  --base-url https://your-modal-app--serve.modal.run/v1 \
   --random \
   --webjudge
+```
+
+## Step 6: Deploying Fine-Tuned Models
+
+After training, you can deploy your fine-tuned model for inference. This involves:
+
+1. **Download LoRA weights** from Tinker
+2. **Merge the adapter** into the base model
+3. **Deploy to Modal** using SGLang or vLLM
+
+### Download Checkpoint Weights
+
+```bash
+# Download the final checkpoint from your training run
+uv run python -m scripts.download_checkpoint \
+  --checkpoint "tinker://YOUR_RUN_ID:train:0/sampler_weights/final" \
+  --output ./checkpoints/
+```
+
+### Deploy to Modal with SGLang (Recommended for Qwen3)
+
+```bash
+# Step 1: Upload LoRA adapter to Modal volume
+uv run modal run scripts/modal_sglang_serve.py::upload_lora_adapter \
+  --local-path ./checkpoints/final
+
+# Step 2: Merge LoRA into base model (runs on Modal GPU)
+uv run modal run scripts/modal_sglang_serve.py::merge_lora_weights
+
+# Step 3: Deploy the server
+uv run modal deploy scripts/modal_sglang_serve.py
+
+# The server will be available at:
+# https://kernel--qwen3-vl-sglang-serve.modal.run/v1/chat/completions
+```
+
+### Deploy to Modal with vLLM
+
+```bash
+# Same workflow as SGLang, using the vLLM script
+uv run modal run scripts/modal_vllm_serve.py::upload_lora_adapter \
+  --local-path ./checkpoints/final
+
+uv run modal run scripts/modal_vllm_serve.py::merge_lora_weights
+
+uv run modal deploy scripts/modal_vllm_serve.py
 ```
 
 ## Next Steps

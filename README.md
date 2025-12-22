@@ -209,7 +209,13 @@ kernel-tinker-rl/
 ├── scripts/                        # Runnable programs
 │   ├── run_agent.py               # Run agent on a single task
 │   ├── train.py                   # RL training loop
-│   └── evaluate.py                # Evaluate with WebJudge
+│   ├── evaluate.py                # Evaluate with WebJudge
+│   ├── plot_metrics.py            # Plot training metrics
+│   ├── split_dataset.py           # Create train/eval splits
+│   ├── download_checkpoint.py     # Download LoRA weights from Tinker
+│   ├── merge_lora.py              # Merge LoRA adapter into base model
+│   ├── modal_sglang_serve.py      # Deploy model with SGLang on Modal
+│   └── modal_vllm_serve.py        # Deploy model with vLLM on Modal
 │
 ├── examples/                       # Custom use cases
 │   └── agent_auth/                 # Login discovery example
