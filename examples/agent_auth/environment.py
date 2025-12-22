@@ -181,10 +181,20 @@ class AgentAuthEnv(Env):
             console.print(f"  {ts()} [red]{self.task.domain}: error=init_failed[/]")
             # Cleanup any partial state
             self.cleanup()
-            # Raise exception to signal Tinker to skip this environment
-            # Returning ModelInput.empty() causes "Empty prompt provided" error
-            # because Tinker tries to sample before calling step()
-            raise RuntimeError(f"Browser initialization failed for {self.task.domain}: {e}") from e
+            # Build a minimal valid conversation for the failed case
+            # We can't use ModelInput.empty() (causes "Empty prompt provided" error)
+            # and can't raise an exception (crashes asyncio.gather in Tinker)
+            # Instead, return a valid text-only prompt; step() will terminate immediately
+            self.conversation = [
+                {"role": "system", "content": self.system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        TextPart(type="text", text=f"Task: {self.task.task}\n\nError: Browser initialization failed."),
+                    ],
+                },
+            ]
+            return self.renderer.build_generation_prompt(self.conversation), self.stop_condition
 
         # Build conversation
         self.conversation = [

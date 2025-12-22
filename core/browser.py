@@ -165,7 +165,7 @@ return { closedPages: pages.length - 1 };
         result = self.kernel.browsers.playwright.execute(
             id=self.session_id,
             code=cleanup_code,
-            timeout_sec=10,
+            timeout_sec=15,
         )
 
         if not result.success:
@@ -273,20 +273,22 @@ return { closedPages: pages.length - 1 };
 
         return current
 
-    def navigate(self, url: str) -> Image.Image:
+    def navigate(self, url: str, max_retries: int = 3) -> Image.Image:
         """
         Navigate the browser to a URL and wait for the page to settle.
 
         Uses visual stability detection instead of unreliable networkidle.
+        Retries on transient network errors (e.g., ERR_BLOCKED_BY_RESPONSE).
 
         Args:
             url: URL to navigate to
+            max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
             The stable screenshot after navigation completes
 
         Raises:
-            RuntimeError: If navigation fails
+            RuntimeError: If navigation fails after all retries
         """
         # Add https:// if no protocol specified
         if not url.startswith(("http://", "https://")):
@@ -295,12 +297,25 @@ return { closedPages: pages.length - 1 };
         baseline = self.capture_screenshot()
 
         code = f'await page.goto("{url}", {{waitUntil: "domcontentloaded"}})'
-        result = self.kernel.browsers.playwright.execute(id=self.session_id, code=code)
 
-        if not result.success:
-            raise RuntimeError(f"Navigation to {url} failed: {result.error}")
+        last_error = None
+        for attempt in range(max_retries):
+            result = self.kernel.browsers.playwright.execute(id=self.session_id, code=code)
 
-        return self.wait_for_screen_settle(baseline=baseline)
+            if result.success:
+                return self.wait_for_screen_settle(baseline=baseline)
+
+            last_error = result.error
+            if attempt < max_retries - 1:
+                # Exponential backoff: 0.5s, 1s, 2s, ...
+                backoff = 0.5 * (2**attempt)
+                logger.warning(
+                    f"Navigation to {url} failed (attempt {attempt + 1}/{max_retries}): "
+                    f"{result.error}. Retrying in {backoff}s..."
+                )
+                time.sleep(backoff)
+
+        raise RuntimeError(f"Navigation to {url} failed after {max_retries} attempts: {last_error}")
 
     def get_current_url(self) -> str:
         """Get the current page URL."""
