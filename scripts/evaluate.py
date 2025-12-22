@@ -47,7 +47,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -89,88 +89,13 @@ AVAILABLE_ENVS = ["osworld", "agent_auth"]
 DEFAULT_AGENT_MODEL = "qwen/qwen3-vl-8b-instruct"
 DEFAULT_WEBJUDGE_MODEL = "openai/gpt-5-mini"
 
-# Default results directory
-DEFAULT_RESULTS_DIR = "results"
-
-
-@dataclass
-class EvalRecord:
-    """A single evaluation record, stored as one line in JSONL."""
-
-    # Run identification
-    run_id: str
-    created_at: str
-
-    # Task identification
-    task_id: str
-    domain: str
-    env: str
-
-    # Model configuration
-    agent_model: str
-    webjudge_model: str
-
-    # Results
-    success: bool
-    score: float
-    reasoning: str
-
-    # Timing
-    duration_seconds: float
-    steps: int
-
-    # Metadata
-    terminal_action: str | None = None
-    error: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return asdict(self)
-
-
-def load_completed_task_ids(
-    results_file: Path, agent_model: str, env: str
-) -> set[str]:
-    """
-    Load task_ids that already have results for this model+env combo.
-
-    This enables resume functionality - tasks that already have results
-    will be skipped on subsequent runs.
-    """
-    completed: set[str] = set()
-    if not results_file.exists():
-        return completed
-
-    with open(results_file) as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-                if record.get("agent_model") == agent_model and record.get("env") == env:
-                    completed.add(record["task_id"])
-            except json.JSONDecodeError:
-                continue  # Skip malformed lines
-
-    return completed
-
-
-def append_result(results_file: Path, record: EvalRecord) -> None:
-    """
-    Append a single result record to the JSONL file.
-
-    Writing immediately after each task enables resume on interrupt.
-    """
-    # Ensure parent directory exists
-    results_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(results_file, "a") as f:
-        f.write(json.dumps(record.to_dict()) + "\n")
-
 
 @dataclass
 class EvalConfig:
     """Configuration for batch evaluation."""
+
+    # Required - path to output JSON file
+    output_file: str
 
     # Environment selection
     env: str = "agent_auth"
@@ -193,14 +118,11 @@ class EvalConfig:
     acquire_timeout_seconds: int = 60
     image_max_size: int = 512
 
-    # Output
-    output_file: str | None = None
+    # Output options
     verbose: bool = False
-    results_dir: str = DEFAULT_RESULTS_DIR
 
     # Control flags
     dry_run: bool = False
-    force_rerun: bool = False  # If True, ignore existing results and rerun all tasks
 
 
 def parse_args() -> EvalConfig:
@@ -277,25 +199,16 @@ def parse_args() -> EvalConfig:
     )
 
     # Output
-    parser.add_argument("--output", "-o", default=None, help="Output JSON file for results")
+    parser.add_argument("--output", "-o", required=True, help="Output JSON file for results")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument(
-        "--results-dir",
-        default=DEFAULT_RESULTS_DIR,
-        help=f"Directory for JSONL result files (default: {DEFAULT_RESULTS_DIR})",
-    )
 
     # Control flags
     parser.add_argument("--dry-run", action="store_true", help="Print config without running")
-    parser.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Ignore existing results and rerun all tasks",
-    )
 
     args = parser.parse_args()
 
     return EvalConfig(
+        output_file=args.output,
         env=args.env,
         agent_model=args.model,
         webjudge_model=args.webjudge_model,
@@ -309,11 +222,8 @@ def parse_args() -> EvalConfig:
         pool_size=args.pool_size,
         acquire_timeout_seconds=args.acquire_timeout,
         image_max_size=args.image_max_size,
-        output_file=args.output,
         verbose=args.verbose,
-        results_dir=args.results_dir,
         dry_run=args.dry_run,
-        force_rerun=args.force_rerun,
     )
 
 
@@ -338,9 +248,7 @@ def print_config(cfg: EvalConfig) -> None:
         table.add_row("Task Index Range", f"{start_str} to {end_str} (inclusive)")
     table.add_row("Pool Name", cfg.pool_name)
     table.add_row("Pool Size", str(cfg.pool_size or "(query from pool)"))
-    table.add_row("Output File", cfg.output_file or "(stdout only)")
-    table.add_row("Results Dir", cfg.results_dir)
-    table.add_row("Force Rerun", str(cfg.force_rerun))
+    table.add_row("Output File", cfg.output_file)
 
     console.print(table)
 
@@ -639,35 +547,6 @@ async def eval_main(cfg: EvalConfig) -> int:
     tasks, system_prompt, extra_actions = get_tasks_and_system_prompt(cfg)
     console.print(f"  Loaded {len(tasks)} tasks")
 
-    # Setup results file for JSONL output
-    results_dir = Path(cfg.results_dir)
-    results_file = results_dir / f"{cfg.env}.jsonl"
-
-    # Check for already-completed tasks (resume support)
-    if cfg.force_rerun:
-        completed_task_ids: set[str] = set()
-        console.print("  [yellow]Force rerun: ignoring existing results[/]")
-    else:
-        completed_task_ids = load_completed_task_ids(
-            results_file, cfg.agent_model, cfg.env
-        )
-        if completed_task_ids:
-            console.print(
-                f"  [dim]Found {len(completed_task_ids)} completed tasks in {results_file}[/]"
-            )
-
-    # Filter out already-completed tasks
-    original_count = len(tasks)
-    tasks = [t for t in tasks if t.id not in completed_task_ids]
-    skipped_count = original_count - len(tasks)
-    if skipped_count > 0:
-        console.print(f"  [dim]Skipping {skipped_count} already-completed tasks[/]")
-    console.print(f"  Tasks to run: {len(tasks)}")
-
-    if len(tasks) == 0:
-        console.print("\n[green]All tasks already completed. Nothing to do.[/]")
-        return 0
-
     # Initialize components
     console.print("\n[bold blue]Initializing components...[/]")
 
@@ -823,28 +702,8 @@ async def eval_main(cfg: EvalConfig) -> int:
                 webjudge_model=cfg.webjudge_model,
             )
 
-            # Create and append EvalRecord to JSONL (enables resume on interrupt)
-            eval_record = EvalRecord(
-                run_id=batch_id,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                task_id=task.id,
-                domain=task.domain,
-                env=cfg.env,
-                agent_model=cfg.agent_model,
-                webjudge_model=cfg.webjudge_model,
-                success=success,
-                score=score,
-                reasoning=reasoning[:500] if reasoning else "",  # Truncate for storage
-                duration_seconds=round(t_elapsed, 2),
-                steps=int(metadata.get("steps", 0)),
-                terminal_action=metadata.get("terminal_action"),
-                error=metadata.get("error"),
-            )
-
             # Thread-safe update of counters and results
             async with results_lock:
-                # Append to JSONL file immediately (inside lock to ensure ordering)
-                append_result(results_file, eval_record)
                 completed_count += 1
                 if success:
                     success_count += 1
@@ -892,35 +751,38 @@ async def eval_main(cfg: EvalConfig) -> int:
     summary_table.add_row("Success Rate", f"{success_rate:.1f}%")
     summary_table.add_row("Total Time", f"{total_time:.1f}s (wall clock)")
     summary_table.add_row("Avg Time/Task", f"{avg_task_duration:.1f}s")
-    summary_table.add_row("Results File", str(results_file))
+    summary_table.add_row("Output File", cfg.output_file)
 
     console.print(summary_table)
 
     # Print DuckDB query hint
     console.print(f"\n[dim]Query results with: duckdb -c \".read queries/eval_summary.sql\"[/]")
 
-    # Write results to file
-    if cfg.output_file:
-        output_data = {
-            "config": {
-                "env": cfg.env,
-                "agent_model": cfg.agent_model,
-                "webjudge_model": cfg.webjudge_model,
-                "max_steps": cfg.max_steps,
-            },
-            "summary": {
-                "total_tasks": len(tasks),
-                "success_count": success_count,
-                "success_rate": success_rate,
-                "total_time_seconds": round(total_time, 2),
-            },
-            "results": results,
-        }
+    # Write results to JSON file
+    output_data = {
+        "config": {
+            "env": cfg.env,
+            "agent_model": cfg.agent_model,
+            "webjudge_model": cfg.webjudge_model,
+            "max_steps": cfg.max_steps,
+        },
+        "summary": {
+            "total_tasks": len(tasks),
+            "success_count": success_count,
+            "success_rate": success_rate,
+            "total_time_seconds": round(total_time, 2),
+        },
+        "results": results,
+    }
 
-        with open(cfg.output_file, "w") as f:
-            json.dump(output_data, f, indent=2)
+    # Ensure output directory exists
+    output_path = Path(cfg.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        console.print(f"\n  Results written to: {cfg.output_file}")
+    with open(cfg.output_file, "w") as f:
+        json.dump(output_data, f, indent=2)
+
+    console.print(f"\n  Results written to: {cfg.output_file}")
 
     # Flush and shutdown Raindrop
     if is_raindrop_enabled():
