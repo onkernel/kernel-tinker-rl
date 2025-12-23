@@ -88,6 +88,61 @@ uv run python -m scripts.run_agent \
     --webjudge
 ```
 
+### 5. Split Dataset for Training
+
+Create train/eval splits from a task dataset:
+
+```bash
+# Split the agent_auth tasks (80% train, 20% eval)
+uv run python -m scripts.split_dataset examples/agent_auth/tasks.jsonl
+
+# This creates:
+#   examples/agent_auth/tasks_train.jsonl (training set)
+#   examples/agent_auth/tasks_eval.jsonl  (held-out evaluation set)
+```
+
+### 6. Evaluate Baseline Performance
+
+Before training, measure the base model's performance on the eval set:
+
+```bash
+uv run python -m scripts.evaluate \
+    --env agent_auth \
+    --task-file examples/agent_auth/tasks_eval.jsonl \
+    --pool-name rl-training \
+    --output results/baseline_eval.json
+```
+
+### 7. Train with RL
+
+Run GRPO training on the training set:
+
+```bash
+uv run python -m scripts.train \
+    --env agent_auth \
+    --task-file examples/agent_auth/tasks_train.jsonl \
+    --pool-name rl-training \
+    --wandb-project my-agent-training
+```
+
+Training outputs checkpoints to `./results/<run_name>/`. See the Tinker logs for checkpoint paths (e.g., `tinker://model_id/checkpoint_name`).
+
+### 8. Evaluate the Trained Model
+
+Compare your trained model against the baseline on the held-out eval set:
+
+```bash
+# Evaluate using a Tinker checkpoint
+uv run python -m scripts.evaluate \
+    --env agent_auth \
+    --task-file examples/agent_auth/tasks_eval.jsonl \
+    --model tinker://your-model-id/checkpoint-step-50 \
+    --pool-name rl-training \
+    --output results/trained_eval.json
+```
+
+Compare `results/baseline_eval.json` and `results/trained_eval.json` to measure improvement.
+
 ---
 
 ## Core Concepts
